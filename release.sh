@@ -2,7 +2,7 @@
 # NOTE: requires zsh because of subdirectory wildstars!
 set -e
 
-git clone --depth 1 https://dawn.googlesource.com/dawn
+# git clone --depth 1 https://dawn.googlesource.com/dawn
 cd dawn
 git rev-parse HEAD >../dawn.ref
 cd ..
@@ -45,3 +45,12 @@ rm -rf src/tint/utils/command
 # depends on abseil, only used by wgsl reader
 rm src/tint/utils/strconv/parse_num.*
 rm -rf src/tint/lang/wgsl/reader
+
+# platform specific code
+rm src/tint/utils/system/executable*
+rm src/tint/utils/system/env_windows.cc
+rm src/tint/utils/system/terminal_posix.cc
+rm src/tint/utils/system/terminal_windows.cc
+rm src/tint/utils/text/*_ansi.cc
+rm src/tint/utils/text/*_posix.cc
+rm src/tint/utils/text/*_windows.cc
