@@ -56,5 +56,4 @@ rm src/tint/utils/text/*_posix.cc
 rm src/tint/utils/text/*_windows.cc
 
 rm -rf src/tint/utils/file
-rm -rf src/tint/utils/ice
 rm -rf src/tint/utils/protos
