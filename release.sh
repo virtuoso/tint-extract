@@ -54,3 +54,7 @@ rm src/tint/utils/system/terminal_windows.cc
 rm src/tint/utils/text/*_ansi.cc
 rm src/tint/utils/text/*_posix.cc
 rm src/tint/utils/text/*_windows.cc
+
+rm -rf src/tint/utils/file
+rm -rf src/tint/utils/ice
+rm -rf src/tint/utils/protos
