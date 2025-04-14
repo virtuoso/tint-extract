@@ -1,3 +1,5 @@
+#!/usr/bin/env zsh
+# NOTE: requires zsh because of subdirectory wildstars!
 set -e
 
 git clone --depth 1 https://dawn.googlesource.com/dawn
@@ -8,3 +10,5 @@ cd ..
 rm -rf src
 mkdir -p src
 cp -r dawn/src/tint src/
+rm -rf src/**/BUILD.*
+rm -rf src/**/*_test.cc
