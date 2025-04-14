@@ -29,3 +29,4 @@ rm -rf src/tint/lang/core/ir/binary
 rm -rf src/tint/lang/glsl
 rm -rf src/tint/lang/hlsl
 rm -rf src/tint/lang/msl
+rm -rf src/tint/lang/wgsl/ls
