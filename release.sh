@@ -26,8 +26,22 @@ rm -rf src/**/*_fuzz.cc
 
 # remove some files to reduce dependencies (we only need SPIRV reading and WGSL writing)
 rm -rf src/tint/lang/core/ir/binary
+
+# depends on glslang
 rm -rf src/tint/lang/glsl
+
+# depends on dxc
 rm -rf src/tint/lang/hlsl
+
+# not needed by sokol-shdc
 rm -rf src/tint/lang/msl
+
+# language server depends on an external dependencies
 rm -rf src/tint/lang/wgsl/ls
+
+# this contains platform specific code, only needed for cmdline tool
 rm -rf src/tint/utils/command
+
+# depends on abseil, only used by wgsl reader
+rm src/tint/utils/strconv/parse_num.*
+rm -rf src/tint/lang/wgsl/reader
