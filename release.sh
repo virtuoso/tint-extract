@@ -1,5 +1,6 @@
 #!/usr/bin/env zsh
 # NOTE: requires zsh because of subdirectory wildstars!
+# NOTE: requires protoc in the path (brew install protobuf)
 set -e
 
 git clone --depth 1 https://dawn.googlesource.com/dawn
@@ -22,3 +23,4 @@ cp -r dawn/include/tint include
 rm -rf src/**/BUILD.*
 rm -rf src/**/*_test.cc
 rm -rf src/**/*_bench.cc
+rm -rf src/**/*_fuzz.cc
