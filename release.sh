@@ -2,7 +2,7 @@
 # NOTE: requires zsh because of subdirectory wildstars!
 set -e
 
-# git clone --depth 1 https://dawn.googlesource.com/dawn
+git clone --depth 1 https://dawn.googlesource.com/dawn
 cd dawn
 git rev-parse HEAD >../dawn.ref
 cd ..
