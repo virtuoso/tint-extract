@@ -10,5 +10,7 @@ cd ..
 rm -rf src
 mkdir -p src
 cp -r dawn/src/tint src/
+rm -rf src/cmd
 rm -rf src/**/BUILD.*
 rm -rf src/**/*_test.cc
+rm -rf src/**/*_bench.cc
