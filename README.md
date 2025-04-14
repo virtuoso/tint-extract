@@ -1,6 +1,6 @@
-Just the Tint sources extracted from the Dawn repository at:
+A subset of the Tint sources extracted from the Dawn repository at:
 
 https://dawn.googlesource.com/dawn
 
-(why: the entire Dawn repo is nearly half a gig of stuff, while
-the Tint sources are 'just' around 30 MBytes)
+This is specifically for the Sokol shader compiler (https://github.com/floooh/sokol-tools)
+and only contains SPIRV reading and WGSL writing features.

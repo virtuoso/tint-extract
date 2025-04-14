@@ -24,5 +24,8 @@ rm -rf src/**/*_test.cc
 rm -rf src/**/*_bench.cc
 rm -rf src/**/*_fuzz.cc
 
-# those binary encoders/decoders don't need to be called anywhere but require protobuf
+# remove some files to reduce dependencies (we only need SPIRV reading and WGSL writing)
 rm -rf src/tint/lang/core/ir/binary
+rm -rf src/tint/lang/glsl
+rm -rf src/tint/lang/hlsl
+rm -rf src/tint/lang/msl
