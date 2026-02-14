@@ -37,7 +37,6 @@
 #include "src/tint/lang/core/ir/function_param.h"
 #include "src/tint/lang/core/ir/value.h"
 #include "src/tint/lang/core/type/type.h"
-#include "src/tint/utils/containers/const_propagating_ptr.h"
 #include "src/tint/utils/ice/ice.h"
 
 // Forward declarations
@@ -233,7 +232,7 @@ class Function : public Castable<Function, Value> {
     } return_;
 
     Vector<FunctionParam*, 1> params_;
-    ConstPropagatingPtr<ir::Block> block_;
+    ir::Block* block_ = nullptr;
 };
 
 /// @param value the enum value
@@ -243,7 +242,8 @@ std::string_view ToString(Function::PipelineStage value);
 /// @param out the stream to write to
 /// @param value the Function::PipelineStage
 /// @returns @p out so calls can be chained
-template <typename STREAM, typename = traits::EnableIfIsOStream<STREAM>>
+template <typename STREAM>
+    requires(traits::IsOStream<STREAM>)
 auto& operator<<(STREAM& out, Function::PipelineStage value) {
     return out << ToString(value);
 }

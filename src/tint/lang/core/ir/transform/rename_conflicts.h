@@ -42,6 +42,7 @@ namespace tint::core::ir::transform {
 const core::ir::Capabilities kRenameConflictsCapabilities{
     core::ir::Capability::kAllow8BitIntegers,
     core::ir::Capability::kAllow64BitIntegers,
+    core::ir::Capability::kAllowMultipleEntryPoints,
     core::ir::Capability::kAllowOverrides,
     core::ir::Capability::kAllowPointersAndHandlesInStructures,
     core::ir::Capability::kAllowVectorElementPointer,
@@ -49,6 +50,11 @@ const core::ir::Capabilities kRenameConflictsCapabilities{
     core::ir::Capability::kAllowClipDistancesOnF32,
     core::ir::Capability::kAllowPrivateVarsInFunctions,
     core::ir::Capability::kAllowAnyLetType,
+    core::ir::Capability::kAllowModuleScopeLets,
+    core::ir::Capability::kAllowWorkspacePointerInputToEntryPoint,
+    core::ir::Capability::kAllowDuplicateBindings,
+    core::ir::Capability::kAllowNonCoreTypes,
+    core::ir::Capability::kLoosenValidationForShaderIO,
 };
 
 /// RenameConflicts is a transform that renames declarations which prevent identifiers from

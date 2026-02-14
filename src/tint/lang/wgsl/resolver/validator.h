@@ -163,10 +163,6 @@ class Validator {
     bool IsPlain(const core::type::Type* type) const;
 
     /// @param type the given type
-    /// @returns true if the given type is a fixed-footprint type
-    bool IsFixedFootprint(const core::type::Type* type) const;
-
-    /// @param type the given type
     /// @returns true if the given type is storable
     bool IsStorable(const core::type::Type* type) const;
 
@@ -197,15 +193,6 @@ class Validator {
     ///        locally-declared element AST node.
     /// @returns true on success, false otherwise.
     bool Array(const sem::Array* arr, const Source& el_source) const;
-
-    /// Validates an array stride attribute
-    /// @param attr the stride attribute to validate
-    /// @param el_size the element size
-    /// @param el_align the element alignment
-    /// @returns true on success, false otherwise
-    bool ArrayStrideAttribute(const ast::StrideAttribute* attr,
-                              uint32_t el_size,
-                              uint32_t el_align) const;
 
     /// Validates an atomic type
     /// @param a the atomic ast node
@@ -247,13 +234,11 @@ class Validator {
     /// @param storage_type the attribute storage type
     /// @param stage the current pipeline stage
     /// @param is_input true if this is an input attribute
-    /// @param ignore_clip_distances_type_validation true if ignore type check on clip_distances
     /// @returns true on success, false otherwise.
     bool BuiltinAttribute(const ast::BuiltinAttribute* attr,
                           const core::type::Type* storage_type,
                           ast::PipelineStage stage,
-                          const bool is_input,
-                          const bool ignore_clip_distances_type_validation = false) const;
+                          const bool is_input) const;
 
     /// Validates a continue statement
     /// @param stmt the continue statement to validate
@@ -436,6 +421,12 @@ class Validator {
     /// @returns true on success, false otherwise
     bool StorageTexture(const core::type::StorageTexture* t, const Source& source) const;
 
+    /// Validates a texel buffer
+    /// @param t the texel buffer to validate
+    /// @param source the source of the texel buffer
+    /// @returns true on success, false otherwise
+    bool TexelBuffer(const core::type::TexelBuffer* t, const Source& source) const;
+
     /// Validates a sampled texture
     /// @param t the texture to validate
     /// @param source the source of the texture
@@ -462,6 +453,12 @@ class Validator {
     bool InputAttachmentIndexAttribute(const ast::InputAttachmentIndexAttribute* attr,
                                        const core::type::Type* type,
                                        const Source& source) const;
+
+    /// Validates a resource buffer type
+    /// @param t the resource buffer to validate
+    /// @param source the source of the resource buffer type
+    /// @returns true on success, false otherwise
+    bool ResourceBinding(const core::type::ResourceBinding* t, const Source& source) const;
 
     /// Validates a binding array type
     /// @param t the binding array to validate
@@ -574,6 +571,18 @@ class Validator {
     /// @returns true on success, false otherwise
     bool CheckF16Enabled(const Source& source) const;
 
+    /// Validates that 'chromium_experimental_subgroup_matrix' extension is enabled for i8 usage at
+    /// @p source
+    /// @param source the source of the i8 usage
+    /// @returns true on success, false otherwise
+    bool CheckI8Enabled(const Source& source) const;
+
+    /// Validates that 'chromium_experimental_subgroup_matrix' extension is enabled for u8 usage at
+    /// @p source
+    /// @param source the source of the u8 usage
+    /// @returns true on success, false otherwise
+    bool CheckU8Enabled(const Source& source) const;
+
     /// Validates there are no duplicate attributes
     /// @param attributes the list of attributes to validate
     /// @returns true on success, false otherwise.
@@ -596,22 +605,6 @@ class Validator {
     bool AddressSpaceLayout(const core::type::Type* type,
                             core::AddressSpace sc,
                             Source source) const;
-
-    /// @returns true if the attribute list contains a
-    /// ast::DisableValidationAttribute with the validation mode equal to
-    /// `validation`
-    /// @param attributes the attribute list to check
-    /// @param validation the validation mode to check
-    bool IsValidationDisabled(VectorRef<const ast::Attribute*> attributes,
-                              ast::DisabledValidation validation) const;
-
-    /// @returns true if the attribute list does not contains a
-    /// ast::DisableValidationAttribute with the validation mode equal to
-    /// `validation`
-    /// @param attributes the attribute list to check
-    /// @param validation the validation mode to check
-    bool IsValidationEnabled(VectorRef<const ast::Attribute*> attributes,
-                             ast::DisabledValidation validation) const;
 
   private:
     /// @param ty the type to check
@@ -654,7 +647,6 @@ class Validator {
     bool CheckTypeAccessAddressSpace(const core::type::Type* store_ty,
                                      core::Access access,
                                      core::AddressSpace address_space,
-                                     VectorRef<const tint::ast::Attribute*> attributes,
                                      const Source& source) const;
 
     /// Raises an error if the entry_point @p entry_point uses two or more module-scope 'var's with

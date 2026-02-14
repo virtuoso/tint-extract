@@ -33,6 +33,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "src/tint/lang/core/intrinsic/table.h"
 #include "src/tint/lang/core/ir/access.h"
@@ -66,6 +67,7 @@
 #include "src/tint/lang/core/ir/next_iteration.h"
 #include "src/tint/lang/core/ir/override.h"
 #include "src/tint/lang/core/ir/phony.h"
+#include "src/tint/lang/core/ir/referenced_functions.h"
 #include "src/tint/lang/core/ir/referenced_module_vars.h"
 #include "src/tint/lang/core/ir/return.h"
 #include "src/tint/lang/core/ir/store.h"
@@ -80,6 +82,7 @@
 #include "src/tint/lang/core/ir/user_call.h"
 #include "src/tint/lang/core/ir/var.h"
 #include "src/tint/lang/core/type/array.h"
+#include "src/tint/lang/core/type/binding_array.h"
 #include "src/tint/lang/core/type/bool.h"
 #include "src/tint/lang/core/type/f16.h"
 #include "src/tint/lang/core/type/f32.h"
@@ -90,6 +93,7 @@
 #include "src/tint/lang/core/type/memory_view.h"
 #include "src/tint/lang/core/type/pointer.h"
 #include "src/tint/lang/core/type/reference.h"
+#include "src/tint/lang/core/type/sampled_texture.h"
 #include "src/tint/lang/core/type/storage_texture.h"
 #include "src/tint/lang/core/type/type.h"
 #include "src/tint/lang/core/type/u32.h"
@@ -103,6 +107,7 @@
 #include "src/tint/utils/containers/transform.h"
 #include "src/tint/utils/diagnostic/diagnostic.h"
 #include "src/tint/utils/ice/ice.h"
+#include "src/tint/utils/internal_limits.h"
 #include "src/tint/utils/macros/defer.h"
 #include "src/tint/utils/result.h"
 #include "src/tint/utils/rtti/castable.h"
@@ -158,7 +163,14 @@ bool InvariantOnlyIfAlsoPosition(const tint::core::IOAttributes& attr) {
 /// Note: Does not handle corner cases like if certain capabilities are
 /// enabled.
 bool IsValidFunctionParamType(const core::type::Type* ty) {
-    return ty->IsConstructible() || ty->Is<core::type::Pointer>() || ty->IsHandle();
+    if (ty->IsConstructible() || ty->IsHandle()) {
+        return true;
+    }
+
+    if (auto* ptr = ty->As<core::type::Pointer>()) {
+        return ptr->AddressSpace() != core::AddressSpace::kHandle;
+    }
+    return false;
 }
 
 /// @returns true if @p ty is a non-struct and decorated with @builtin(position), or if it is a
@@ -198,6 +210,11 @@ void CheckIOAttributes(const MSG_ANCHOR* msg_anchor,
     if (auto* ty_struct = ty->As<core::type::Struct>()) {
         for (const auto* mem : ty_struct->Members()) {
             is_struct_impl(msg_anchor, mem->Attributes());
+
+            if (mem->Type()->Is<core::type::Struct>()) {
+                CheckIOAttributes(msg_anchor, ty_attr, mem->Type(), is_not_struct_impl,
+                                  is_struct_impl);
+            }
         }
     } else {
         is_not_struct_impl(msg_anchor, ty_attr);
@@ -286,25 +303,17 @@ void CheckFunctionParamAttributesAndType(const FunctionParam* param, IMPL&& impl
     CheckIOAttributesAndType(param, param->Attributes(), param->Type(), std::forward<IMPL>(impl));
 }
 
-/// Helper for calling IOAttributesAndType on a function return
-/// @param func function's return to be tested
-/// See @ref IOAttributesAndType for more details
-template <typename IS_NOT_STRUCT, typename IS_STRUCT>
-void CheckFunctionReturnAttributesAndType(const Function* func,
-                                          IS_NOT_STRUCT&& is_not_struct_impl,
-                                          IS_STRUCT&& is_struct_impl) {
-    CheckIOAttributesAndType(func, func->ReturnAttributes(), func->ReturnType(),
-                             std::forward<IS_NOT_STRUCT>(is_not_struct_impl),
-                             std::forward<IS_STRUCT>(is_struct_impl));
-}
+/// The IO direction of a operation.
+enum class IODirection : uint8_t { kInput, kOutput };
 
-/// Helper for calling IOAttributesAndType on a function return
-/// @param func function's return to be tested
-/// See @ref IOAttributesAndType for more details
-template <typename IMPL>
-void CheckFunctionReturnAttributesAndType(const Function* func, IMPL&& impl) {
-    CheckIOAttributesAndType(func, func->ReturnAttributes(), func->ReturnType(),
-                             std::forward<IMPL>(impl));
+std::string_view ToString(IODirection value) {
+    switch (value) {
+        case IODirection::kInput:
+            return "input";
+        case IODirection::kOutput:
+            return "output";
+    }
+    TINT_ICE() << "Unknown enum passed to ToString(IODirection)";
 }
 
 /// A BuiltinChecker is the interface used to check that a usage of a builtin attribute meets the
@@ -318,7 +327,6 @@ struct BuiltinChecker {
     /// What type of entry point is this builtin legal for
     EnumSet<Function::PipelineStage> stages;
 
-    enum IODirection : uint8_t { kInput, kOutput };
     /// Is this expected to be a param going into the entry point or a result coming out
     IODirection direction;
 
@@ -332,20 +340,10 @@ struct BuiltinChecker {
     const char* type_error;
 };
 
-std::string_view ToString(BuiltinChecker::IODirection value) {
-    switch (value) {
-        case BuiltinChecker::IODirection::kInput:
-            return "input";
-        case BuiltinChecker::IODirection::kOutput:
-            return "output";
-    }
-    TINT_ICE() << "Unknown enum passed to ToString(BuiltinChecker::IODirection)";
-}
-
 constexpr BuiltinChecker kPointSizeChecker{
     /* name */ "__point_size",
     /* stages */ EnumSet<Function::PipelineStage>(Function::PipelineStage::kVertex),
-    /* direction */ BuiltinChecker::IODirection::kOutput,
+    /* direction */ IODirection::kOutput,
     /* type_check */ [](const core::type::Type* ty) -> bool { return ty->Is<core::type::F32>(); },
     /* type_error */ "__point_size must be a f32",
 };
@@ -353,7 +351,7 @@ constexpr BuiltinChecker kPointSizeChecker{
 constexpr BuiltinChecker kCullDistanceChecker{
     /* name */ "__cull_distance",
     /* stages */ EnumSet<Function::PipelineStage>(Function::PipelineStage::kVertex),
-    /* direction */ BuiltinChecker::IODirection::kOutput,
+    /* direction */ IODirection::kOutput,
     /* type_check */
     [](const core::type::Type* ty) -> bool {
         return ty->Is<core::type::Array>() && ty->DeepestElement()->Is<core::type::F32>();
@@ -364,7 +362,7 @@ constexpr BuiltinChecker kCullDistanceChecker{
 constexpr BuiltinChecker kFragDepthChecker{
     /* name */ "frag_depth",
     /* stages */ EnumSet<Function::PipelineStage>(Function::PipelineStage::kFragment),
-    /* direction */ BuiltinChecker::IODirection::kOutput,
+    /* direction */ IODirection::kOutput,
     /* type_check */ [](const core::type::Type* ty) -> bool { return ty->Is<core::type::F32>(); },
     /* type_error */ "frag_depth must be a f32",
 };
@@ -372,7 +370,7 @@ constexpr BuiltinChecker kFragDepthChecker{
 constexpr BuiltinChecker kFrontFacingChecker{
     /* name */ "front_facing",
     /* stages */ EnumSet<Function::PipelineStage>(Function::PipelineStage::kFragment),
-    /* direction */ BuiltinChecker::IODirection::kInput,
+    /* direction */ IODirection::kInput,
     /* type_check */ [](const core::type::Type* ty) -> bool { return ty->Is<core::type::Bool>(); },
     /* type_error */ "front_facing must be a bool",
 };
@@ -380,7 +378,7 @@ constexpr BuiltinChecker kFrontFacingChecker{
 constexpr BuiltinChecker kGlobalInvocationIdChecker{
     /* name */ "global_invocation_id",
     /* stages */ EnumSet<Function::PipelineStage>(Function::PipelineStage::kCompute),
-    /* direction */ BuiltinChecker::IODirection::kInput,
+    /* direction */ IODirection::kInput,
     /* type_check */
     [](const core::type::Type* ty) -> bool {
         return ty->IsUnsignedIntegerVector() && ty->Elements().count == 3;
@@ -391,7 +389,7 @@ constexpr BuiltinChecker kGlobalInvocationIdChecker{
 constexpr BuiltinChecker kInstanceIndexChecker{
     /* name */ "instance_index",
     /* stages */ EnumSet<Function::PipelineStage>(Function::PipelineStage::kVertex),
-    /* direction */ BuiltinChecker::IODirection::kInput,
+    /* direction */ IODirection::kInput,
     /* type_check */ [](const core::type::Type* ty) -> bool { return ty->Is<core::type::U32>(); },
     /* type_error */ "instance_index must be an u32",
 };
@@ -399,7 +397,7 @@ constexpr BuiltinChecker kInstanceIndexChecker{
 constexpr BuiltinChecker kLocalInvocationIdChecker{
     /* name */ "local_invocation_id",
     /* stages */ EnumSet<Function::PipelineStage>(Function::PipelineStage::kCompute),
-    /* direction */ BuiltinChecker::IODirection::kInput,
+    /* direction */ IODirection::kInput,
     /* type_check */
     [](const core::type::Type* ty) -> bool {
         return ty->IsUnsignedIntegerVector() && ty->Elements().count == 3;
@@ -410,15 +408,23 @@ constexpr BuiltinChecker kLocalInvocationIdChecker{
 constexpr BuiltinChecker kLocalInvocationIndexChecker{
     /* name */ "local_invocation_index",
     /* stages */ EnumSet<Function::PipelineStage>(Function::PipelineStage::kCompute),
-    /* direction */ BuiltinChecker::IODirection::kInput,
+    /* direction */ IODirection::kInput,
     /* type_check */ [](const core::type::Type* ty) -> bool { return ty->Is<core::type::U32>(); },
     /* type_error */ "local_invocation_index must be an u32",
+};
+
+constexpr BuiltinChecker kNumSubgroupsChecker{
+    /* name */ "num_subgroups",
+    /* stages */ EnumSet<Function::PipelineStage>(Function::PipelineStage::kCompute),
+    /* direction */ IODirection::kInput,
+    /* type_check */ [](const core::type::Type* ty) -> bool { return ty->Is<core::type::U32>(); },
+    /* type_error */ "num_subgroups must be an u32",
 };
 
 constexpr BuiltinChecker kNumWorkgroupsChecker{
     /* name */ "num_workgroups",
     /* stages */ EnumSet<Function::PipelineStage>(Function::PipelineStage::kCompute),
-    /* direction */ BuiltinChecker::IODirection::kInput,
+    /* direction */ IODirection::kInput,
     /* type_check */
     [](const core::type::Type* ty) -> bool {
         return ty->IsUnsignedIntegerVector() && ty->Elements().count == 3;
@@ -429,9 +435,18 @@ constexpr BuiltinChecker kNumWorkgroupsChecker{
 constexpr BuiltinChecker kSampleIndexChecker{
     /* name */ "sample_index",
     /* stages */ EnumSet<Function::PipelineStage>(Function::PipelineStage::kFragment),
-    /* direction */ BuiltinChecker::IODirection::kInput,
+    /* direction */ IODirection::kInput,
     /* type_check */ [](const core::type::Type* ty) -> bool { return ty->Is<core::type::U32>(); },
     /* type_error */ "sample_index must be an u32",
+};
+
+constexpr BuiltinChecker kSubgroupIdChecker{
+    /* name */ "subgroup_id",
+    /* stages */
+    EnumSet<Function::PipelineStage>(Function::PipelineStage::kCompute),
+    /* direction */ IODirection::kInput,
+    /* type_check */ [](const core::type::Type* ty) -> bool { return ty->Is<core::type::U32>(); },
+    /* type_error */ "subgroup_id must be an u32",
 };
 
 constexpr BuiltinChecker kSubgroupInvocationIdChecker{
@@ -439,7 +454,7 @@ constexpr BuiltinChecker kSubgroupInvocationIdChecker{
     /* stages */
     EnumSet<Function::PipelineStage>(Function::PipelineStage::kFragment,
                                      Function::PipelineStage::kCompute),
-    /* direction */ BuiltinChecker::IODirection::kInput,
+    /* direction */ IODirection::kInput,
     /* type_check */ [](const core::type::Type* ty) -> bool { return ty->Is<core::type::U32>(); },
     /* type_error */ "subgroup_invocation_id must be an u32",
 };
@@ -449,7 +464,7 @@ constexpr BuiltinChecker kSubgroupSizeChecker{
     /* stages */
     EnumSet<Function::PipelineStage>(Function::PipelineStage::kFragment,
                                      Function::PipelineStage::kCompute),
-    /* direction */ BuiltinChecker::IODirection::kInput,
+    /* direction */ IODirection::kInput,
     /* type_check */ [](const core::type::Type* ty) -> bool { return ty->Is<core::type::U32>(); },
     /* type_error */ "subgroup_size must be an u32",
 };
@@ -457,7 +472,7 @@ constexpr BuiltinChecker kSubgroupSizeChecker{
 constexpr BuiltinChecker kVertexIndexChecker{
     /* name */ "vertex_index",
     /* stages */ EnumSet<Function::PipelineStage>(Function::PipelineStage::kVertex),
-    /* direction */ BuiltinChecker::IODirection::kInput,
+    /* direction */ IODirection::kInput,
     /* type_check */ [](const core::type::Type* ty) -> bool { return ty->Is<core::type::U32>(); },
     /* type_error */ "vertex_index must be an u32",
 };
@@ -465,12 +480,32 @@ constexpr BuiltinChecker kVertexIndexChecker{
 constexpr BuiltinChecker kWorkgroupIdChecker{
     /* name */ "workgroup_id",
     /* stages */ EnumSet<Function::PipelineStage>(Function::PipelineStage::kCompute),
-    /* direction */ BuiltinChecker::IODirection::kInput,
+    /* direction */ IODirection::kInput,
     /* type_check */
     [](const core::type::Type* ty) -> bool {
         return ty->IsUnsignedIntegerVector() && ty->Elements().count == 3;
     },
     /* type_error */ "workgroup_id must be an vec3<u32>",
+};
+
+constexpr BuiltinChecker kPrimitiveIndexChecker{
+    /* name */ "primitive_index",
+    /* stages */ EnumSet<Function::PipelineStage>(Function::PipelineStage::kFragment),
+    /* direction */ IODirection::kInput,
+    /* type_check */
+    [](const core::type::Type* ty) -> bool { return ty->Is<core::type::U32>(); },
+    /* type_error */ "primitive_index must be an u32",
+};
+
+constexpr BuiltinChecker kBarycentricCoordChecker{
+    /* name */ "barycentric_coord",
+    /* stages */ EnumSet<Function::PipelineStage>(Function::PipelineStage::kFragment),
+    /* direction */ IODirection::kInput,
+    /* type_check */
+    [](const core::type::Type* ty) -> bool {
+        return ty->IsFloatVector() && ty->Elements().count == 3;
+    },
+    /* type_error */ "barycentric_coord must be an vec3<f32>",
 };
 
 /// @returns an appropriate BuiltInCheck for @p builtin, ICEs when one isn't defined
@@ -492,10 +527,14 @@ const BuiltinChecker& BuiltinCheckerFor(BuiltinValue builtin) {
             return kLocalInvocationIdChecker;
         case BuiltinValue::kLocalInvocationIndex:
             return kLocalInvocationIndexChecker;
+        case BuiltinValue::kNumSubgroups:
+            return kNumSubgroupsChecker;
         case BuiltinValue::kNumWorkgroups:
             return kNumWorkgroupsChecker;
         case BuiltinValue::kSampleIndex:
             return kSampleIndexChecker;
+        case BuiltinValue::kSubgroupId:
+            return kSubgroupIdChecker;
         case BuiltinValue::kSubgroupInvocationId:
             return kSubgroupInvocationIdChecker;
         case BuiltinValue::kSubgroupSize:
@@ -504,6 +543,10 @@ const BuiltinChecker& BuiltinCheckerFor(BuiltinValue builtin) {
             return kVertexIndexChecker;
         case BuiltinValue::kWorkgroupId:
             return kWorkgroupIdChecker;
+        case BuiltinValue::kPrimitiveIndex:
+            return kPrimitiveIndexChecker;
+        case BuiltinValue::kBarycentricCoord:
+            return kBarycentricCoordChecker;
         case BuiltinValue::kPosition:
             TINT_ICE() << "BuiltinValue::kPosition requires special handling, so does not have a "
                           "checker defined";
@@ -587,7 +630,7 @@ Result<SuccessType, std::string> ValidateBuiltinClipDistances(Function::Pipeline
         if (!ty->Is<core::type::F32>() && !is_valid_array()) {
             return std::string("clip_distances must be an f32 or an array<f32, N>, where N <= 8");
         }
-    } else if (!is_valid_array()) {
+    } else if (!ty->Is<core::type::Array>() || !is_valid_array()) {
         return std::string("clip_distances must be an array<f32, N>, where N <= 8");
     }
 
@@ -643,8 +686,7 @@ Result<SuccessType, std::string> ValidateBuiltIn(BuiltinValue builtin,
         return msg.str();
     }
 
-    auto io_direction =
-        is_input ? BuiltinChecker::IODirection::kInput : BuiltinChecker::IODirection::kOutput;
+    auto io_direction = is_input ? IODirection::kInput : IODirection::kOutput;
     if (io_direction != checker.direction) {
         msg << checker.name << " must be an " << ToString(checker.direction)
             << " of a shader entry point";
@@ -738,6 +780,35 @@ Result<SuccessType, IOAnnotation> AddIOAnnotationsFromIOAttributes(
     return Success;
 }
 
+/// The kind of shader IO being validated.
+enum class ShaderIOKind : uint8_t {
+    kInputParam,
+    kResultValue,
+    kModuleScopeVar,
+};
+
+/// @returns text describing the shader IO kind for error logging
+std::string ToString(ShaderIOKind value) {
+    switch (value) {
+        case ShaderIOKind::kInputParam:
+            return "input param";
+        case ShaderIOKind::kResultValue:
+            return "return value";
+        case ShaderIOKind::kModuleScopeVar:
+            return "module scope variable";
+    }
+    TINT_ICE() << "Unknown enum passed to ToString(ShaderIOKind)";
+}
+
+/// State for validating blend_src attributes.
+struct BlendSrcContext {
+    Function::PipelineStage stage;
+    Hashmap<uint32_t, const CastableBase*, 4> locations;
+    Hashset<uint32_t, 2> blend_srcs;
+    const core::type::Type* blend_src_type = nullptr;
+    IODirection dir;
+};
+
 /// The core IR validator.
 class Validator {
   public:
@@ -758,6 +829,10 @@ class Validator {
     /// Also runs any validation that is not dependent on the entire module being
     /// sound and sets up data structures for later checks.
     void RunStructuralSoundnessChecks();
+
+    /// Checks that there is no direct or indirect recursion.
+    /// Depends on CheckStructuralSoundness() having previously been run.
+    void CheckForRecursion();
 
     /// Checks that there are no orphaned instructions
     /// Depends on CheckStructuralSoundness() having previously been run
@@ -807,6 +882,11 @@ class Validator {
     /// @param param the parameter
     /// @returns the diagnostic
     diag::Diagnostic& AddError(const FunctionParam* param);
+
+    /// Adds an error for the castable base @p base and highlights it in the disassembly
+    /// @param base the declaration to add an error for
+    /// @returns the diagnostic
+    diag::Diagnostic& AddError(const CastableBase* base);
 
     /// Adds an error the @p block and highlights the block header in the disassembly
     /// @param src the source lines to highlight
@@ -979,9 +1059,55 @@ class Validator {
     /// @param func the function to validate
     void CheckWorkgroupSize(const Function* func);
 
+    /// Validates the entry point IO locations for an entry point.
+    /// Additionally validates usages of blend_src, since they are intrinsically tied with location.
+    /// @param func the function to validate
+    void CheckEntryPointLocationsAndBlendSrc(const Function* func);
+
     /// Validates the specific function as a vertex entry point
     /// @param ep the function to validate
     void CheckVertexEntryPoint(const Function* ep);
+
+    /// Helper for calling IOAttributesAndType on a function return
+    /// @param func function's return to be tested
+    /// See @ref IOAttributesAndType for more details
+    template <typename IS_NOT_STRUCT, typename IS_STRUCT>
+    void CheckFunctionReturnAttributesAndType(const Function* func,
+                                              IS_NOT_STRUCT&& is_not_struct_impl,
+                                              IS_STRUCT&& is_struct_impl) {
+        CheckIOAttributesAndType(func, func->ReturnAttributes(), func->ReturnType(),
+                                 std::forward<IS_NOT_STRUCT>(is_not_struct_impl),
+                                 std::forward<IS_STRUCT>(is_struct_impl));
+    }
+
+    /// Helper for calling IOAttributesAndType on a function return
+    /// @param func function's return to be tested
+    /// See @ref IOAttributesAndType for more details
+    template <typename IMPL>
+    void CheckFunctionReturnAttributesAndType(const Function* func, IMPL&& impl) {
+        if (func->ReturnType()->Is<core::type::Struct>() &&
+            func->ReturnAttributes().builtin.has_value()) {
+            const char* name;
+            switch (func->ReturnAttributes().builtin.value()) {
+                case BuiltinValue::kPosition:
+                    name = "position";
+                    break;
+                case BuiltinValue::kSampleMask:
+                    name = "sample_mask";
+                    break;
+                case BuiltinValue::kClipDistances:
+                    name = "clip_distances";
+                    break;
+                default:
+                    name = BuiltinCheckerFor(func->ReturnAttributes().builtin.value()).name;
+                    break;
+            }
+            AddError(func) << name << " cannot be attached to a structure";
+        }
+
+        CheckIOAttributesAndType(func, func->ReturnAttributes(), func->ReturnType(),
+                                 std::forward<IMPL>(impl));
+    }
 
     /// @returns a function that validates rules for invariant decorations
     /// @param err error message to log when check fails
@@ -1024,7 +1150,22 @@ class Validator {
         };
     }
 
-    /// @returns a function that validates that type is bool iff decorated with
+    /// @returns a function that validates color attributes on function params
+    auto CheckColorFunctionParam(const std::string& err) {
+        return [this, err](const FunctionParam* param, const IOAttributes& attr,
+                           const core::type::Type*) {
+            if (!attr.color.has_value()) {
+                return;
+            }
+
+            auto* func = param->Function();
+            if (func->IsEntryPoint() && func->Stage() != Function::PipelineStage::kFragment) {
+                AddError(param) << err << "@color can only be used on fragment shader inputs";
+            }
+        };
+    }
+
+    /// @returns a function that validates that type is bool only if it is decorated with
     /// @builtin(front_facing)
     /// @param err error message to log when check fails
     template <typename MSG_ANCHOR>
@@ -1072,21 +1213,68 @@ class Validator {
         AddressSpace address_space,
         const std::string& target_str = "variable");
 
-    /// Validates shader IO annotations for entry point input/output
-    /// Note: Call is required to ensure that the value being validated is associated with an entry
-    ///       point function
+    /// Validates annotations related to shader IO
     /// @param ty type of the value under test
     /// @param binding_point the binding information associated with the value
     /// @param attr IO attributes associated with the values
-    /// @param target_str string to insert in error message describing what has a binding_point,
-    /// something like 'input param' or 'return value'
-    /// @returns Success if one, and only one, shader IO is present, otherwise a Failure with the
-    /// error reason is returned
+    /// @param kind the kind Shader IO being performed
+    /// @returns Success if passes validation, otherwise a Failure with the error reason is returned
     Result<SuccessType, std::string> ValidateShaderIOAnnotations(
         const core::type::Type* ty,
         const std::optional<struct BindingPoint>& binding_point,
         const core::IOAttributes& attr,
-        const std::string& target_str);
+        ShaderIOKind kind);
+
+    /// Validates the blend_src annotations for a ty.
+    /// Note: Assumes that it is being called on a non-struct member
+    /// @param ctx the blend_src context.
+    /// @param target the object that has the struct ty.
+    /// @param ty the ty to validate.
+    /// @param attr the IO attributes for the object.
+    void CheckBlendSrc(BlendSrcContext& ctx,
+                       const CastableBase* target,
+                       const core::type::Type* ty,
+                       const IOAttributes& attr);
+
+    /// Validates blend_src annotations on a single IO object.
+    /// @param ctx the blend_src context.
+    /// @param target the object that has the struct type.
+    /// @param ty the type to validate.
+    /// @param attr the IO attributes for the object.
+    void CheckBlendSrcAnnotation(BlendSrcContext& ctx,
+                                 const CastableBase* target,
+                                 const core::type::Type* ty,
+                                 const IOAttributes& attr);
+
+    /// Rejects any blend_src annotations found within a type hierarchy for struct members.
+    /// @param ctx the blend_src context.
+    /// @param target the object that has the type.
+    /// @param str the struct type with members to be validated.
+    void RejectBlendSrcAnnotationOnStructMembers(BlendSrcContext& ctx,
+                                                 const CastableBase* target,
+                                                 const core::type::Struct* str);
+
+    /// Rejects any blend_src annotations found within a type hierarchy for an array element.
+    /// @param ctx the blend_src context.
+    /// @param target the object that has the type.
+    /// @param arr the array type for elements to be validated.
+    void RejectBlendSrcAnnotationOnArrayElement(BlendSrcContext& ctx,
+                                                const CastableBase* target,
+                                                const core::type::Array* arr);
+
+    /// Validates location annotations on entry point IO.
+    /// @param locations the map of locations used so far for the current IO direction.
+    /// @param target the object that has the location attribute.
+    /// @param attr the IO attributes for the object.
+    /// @param stage the pipeline stage of the entry point.
+    /// @param type the type of the IO object.
+    /// @param dir the IO direction (input or output).
+    void CheckLocation(Hashmap<uint32_t, const CastableBase*, 4>& locations,
+                       const CastableBase* target,
+                       const IOAttributes& attr,
+                       Function::PipelineStage stage,
+                       const core::type::Type* type,
+                       IODirection dir);
 
     /// Validates the given let
     /// @param l the let to validate
@@ -1107,6 +1295,12 @@ class Validator {
     /// Validates the given builtin call
     /// @param call the call to validate
     void CheckBuiltinCall(const BuiltinCall* call);
+
+    /// Validates a core builtin call
+    /// @param call the call to validate
+    /// @param overload the call intrinsic overload
+    void CheckCoreBuiltinCall(const CoreBuiltinCall* call,
+                              const core::intrinsic::Overload& overload);
 
     /// Validates the given member builtin call
     /// @param call the member call to validate
@@ -1250,6 +1444,9 @@ class Validator {
     /// @returns the vector pointer type for the given instruction operand
     const core::type::Type* GetVectorPtrElementType(const Instruction* inst, size_t idx);
 
+    /// @returns true if @p ty and its elements can be loaded
+    bool CanLoad(const core::type::Type* ty);
+
     /// Executes all the pending tasks
     void ProcessTasks();
 
@@ -1353,7 +1550,6 @@ class Validator {
     core::ir::ReferencedModuleVars<const Module> referenced_module_vars_;
     Hashset<OverrideId, 8> seen_override_ids_;
     Hashset<std::string, 4> entry_point_names_;
-
     Hashset<ValidatedType, 16> validated_types_{};
 };
 
@@ -1372,19 +1568,31 @@ Disassembler& Validator::Disassemble() {
 Result<SuccessType> Validator::Run() {
     RunStructuralSoundnessChecks();
 
-    if (!diagnostics_.ContainsErrors()) {
-        CheckForOrphanedInstructions();
-    }
-
-    if (!diagnostics_.ContainsErrors()) {
-        CheckForNonFragmentDiscards();
-    }
+    CheckForRecursion();
+    CheckForOrphanedInstructions();
+    CheckForNonFragmentDiscards();
 
     if (diagnostics_.ContainsErrors()) {
         diagnostics_.AddNote(Source{}) << "# Disassembly\n" << Disassemble().Text();
         return Failure{diagnostics_.Str()};
     }
     return Success;
+}
+
+void Validator::CheckForRecursion() {
+    if (diagnostics_.ContainsErrors()) {
+        return;
+    }
+
+    ReferencedFunctions<const Module> referenced_functions(mod_);
+    for (auto& func : mod_.functions) {
+        auto& refs = referenced_functions.TransitiveReferences(func);
+        if (refs.Contains(func)) {
+            // TODO(434684891): Consider improving this error with more information.
+            AddError(func) << "recursive function calls are not allowed";
+            return;
+        }
+    }
 }
 
 void Validator::CheckForOrphanedInstructions() {
@@ -1408,9 +1616,13 @@ void Validator::CheckForNonFragmentDiscards() {
     // Check for discards in non-fragments
     for (const auto& d : discards_) {
         const auto* f = ContainingFunction(d);
-        for (const Function* ep : ContainingEndPoints(f)) {
-            if (!ep->IsFragment()) {
-                AddError(d) << "cannot be called in non-fragment end point";
+        if (f->IsEntryPoint() && !f->IsFragment()) {
+            AddError(d) << "cannot be called in non-fragment entry point";
+        } else {
+            for (const Function* ep : ContainingEndPoints(f)) {
+                if (!ep->IsFragment()) {
+                    AddError(d) << "cannot be called in non-fragment entry point";
+                }
             }
         }
     }
@@ -1428,9 +1640,8 @@ void Validator::RunStructuralSoundnessChecks() {
     CheckRootBlock(mod_.root_block);
 
     for (auto& func : mod_.functions) {
-        if (!all_functions_.Add(func.Get())) {
-            AddError(func) << "function " << NameOf(func.Get())
-                           << " added to module multiple times";
+        if (!all_functions_.Add(func)) {
+            AddError(func) << "function " << NameOf(func) << " added to module multiple times";
         }
         scope_stack_.Add(func);
     }
@@ -1494,6 +1705,20 @@ diag::Diagnostic& Validator::AddError(const Function* func) {
 diag::Diagnostic& Validator::AddError(const FunctionParam* param) {
     auto src = Disassemble().FunctionParamSource(param);
     return AddError(src);
+}
+
+diag::Diagnostic& Validator::AddError(const CastableBase* base) {
+    diag::Diagnostic* diag = nullptr;
+    tint::Switch(
+        base,  //
+        [&](const Block* block) { diag = &AddError(block); },
+        [&](const BlockParam* param) { diag = &AddError(param); },
+        [&](const Function* fn) { diag = &AddError(fn); },
+        [&](const FunctionParam* param) { diag = &AddError(param); },
+        [&](const Instruction* inst) { diag = &AddError(inst); },
+        [&](const InstructionResult* res) { diag = &AddError(res); });
+    TINT_ASSERT(diag);
+    return *diag;
 }
 
 diag::Diagnostic& Validator::AddNote(const Instruction* inst) {
@@ -1643,6 +1868,22 @@ bool Validator::CheckResult(const Instruction* inst, size_t idx) {
         return false;
     }
 
+    if (!inst->Is<core::ir::Call>() && result->Type()->Is<core::type::Void>()) {
+        AddResultError(inst, idx) << "result type cannot be void";
+        return false;
+    }
+
+    if (inst->Is<core::ir::ControlInstruction>()) {
+        if (result->Type()->Is<core::type::Pointer>()) {
+            AddResultError(inst, idx) << "result type cannot be a pointer";
+            return false;
+        }
+        if (!result->Type()->IsConstructible()) {
+            AddResultError(inst, idx) << "result type must be constructable";
+            return false;
+        }
+    }
+
     return true;
 }
 
@@ -1656,8 +1897,14 @@ bool Validator::CheckResults(const ir::Instruction* inst, std::optional<size_t> 
     }
 
     bool passed = true;
+    Hashset<const InstructionResult*, 4> seen_instruction_results;
     for (size_t i = 0; i < inst->Results().Length(); i++) {
         if (DAWN_UNLIKELY(!CheckResult(inst, i))) {
+            passed = false;
+        }
+
+        if (!seen_instruction_results.Add(inst->Result(i))) {
+            AddResultError(inst, i) << "result was seen previously as a result";
             passed = false;
         }
     }
@@ -1667,12 +1914,13 @@ bool Validator::CheckResults(const ir::Instruction* inst, std::optional<size_t> 
 bool Validator::CheckOperand(const Instruction* inst, size_t idx) {
     auto* operand = inst->Operand(idx);
 
-    // var instructions are allowed to have a nullptr operands
-    if (inst->Is<Var>() && operand == nullptr) {
-        return true;
-    }
-
     if (DAWN_UNLIKELY(operand == nullptr)) {
+        // var instructions are allowed to have a nullptr initializers.
+        // terminator instructions use nullptr operands to signal 'undef'.
+        if (inst->IsAnyOf<Terminator, Var>()) {
+            return true;
+        }
+
         AddError(inst, idx) << "operand is undefined";
         return false;
     }
@@ -1786,8 +2034,21 @@ void Validator::CheckType(const core::type::Type* root,
         return;
     }
 
+    if (!capabilities_.Contains(Capability::kAllowNonCoreTypes)) {
+        // Check for core types, which are the only types declared in the `tint::core` namespace.
+        if (!std::string_view(root->TypeInfo().name).starts_with("tint::core")) {
+            diag() << "non-core types not allowed in core IR";
+            return;
+        }
+    }
+
     if (!validated_types_.Add(ValidatedType{root, ignore_caps})) {
         return;
+    }
+
+    AddressSpace addrspace = AddressSpace::kUndefined;
+    if (auto* mv = root->As<core::type::MemoryView>()) {
+        addrspace = mv->AddressSpace();
     }
 
     auto visit = [&](const core::type::Type* type) {
@@ -1798,6 +2059,105 @@ void Validator::CheckType(const core::type::Type* root,
 
         return tint::Switch(
             type,
+            [&](const core::type::Struct* str) {
+                uint32_t cur_offset = 0;
+                for (auto* member : str->Members()) {
+                    if (member->Type()->Is<core::type::Void>()) {
+                        diag() << "struct member " << member->Index() << " cannot have void type";
+                        return false;
+                    }
+
+                    if (!capabilities_.Contains(Capability::kAllowPointersAndHandlesInStructures)) {
+                        if (member->Type()->Is<core::type::Pointer>()) {
+                            diag() << "struct member " << member->Index()
+                                   << " cannot be a pointer type";
+                            return false;
+                        }
+
+                        if (member->Type()->Is<core::type::Texture>()) {
+                            diag() << "struct member " << member->Index()
+                                   << " cannot be a texture type";
+                            return false;
+                        }
+
+                        if (member->Type()->Is<core::type::Sampler>()) {
+                            diag() << "struct member " << member->Index()
+                                   << " cannot be a sampler type";
+                            return false;
+                        }
+                    }
+
+                    if (auto* arr = member->Type()->As<core::type::Array>();
+                        arr && arr->Count()->Is<core::type::RuntimeArrayCount>()) {
+                        if (member != str->Members().Back()) {
+                            diag() << "runtime-sized arrays can only be the last member of a "
+                                      "struct";
+                            return false;
+                        }
+                    }
+
+                    if (member->Align() == 0) {
+                        diag() << "struct member must not have an alignment of 0";
+                        return false;
+                    }
+                    if (member->Type()->Align() == 0) {
+                        diag() << "struct member type must not have an alignment of 0";
+                        return false;
+                    }
+
+                    if (!capabilities_.Contains(Capability::kAllowStructMatrixDecorations)) {
+                        if (member->RowMajor()) {
+                            diag() << "Row major annotation not allowed on structures";
+                            return false;
+                        }
+                        if (member->HasMatrixStride()) {
+                            diag() << "Matrix stride annotation not allowed on structures";
+                            return false;
+                        }
+                    }
+
+                    // TODO(448608979): Remove guard once updated to handle RowMajor correctly
+                    if (!member->RowMajor()) {
+                        if (member->Size() < member->Type()->Size()) {
+                            diag() << "struct member " << member->Index()
+                                   << " with size=" << member->Size()
+                                   << " must be at least as large as the type with size "
+                                   << member->Type()->Size();
+                            return false;
+                        }
+
+                        if (member->Align() % member->Type()->Align() != 0) {
+                            diag() << "struct member alignment (" << member->Align()
+                                   << ") must be divisible by type alignment ("
+                                   << member->Type()->Align() << ")";
+                            return false;
+                        }
+                    }
+
+                    auto padding = member->Offset() - cur_offset;
+                    if (padding >= internal_limits::kMaxStructMemberPadding) {
+                        diag() << "struct member padding (" << padding
+                               << ") is larger then the max ("
+                               << internal_limits::kMaxStructMemberPadding << ")";
+                        return false;
+                    }
+                    cur_offset += padding + member->MinimumRequiredSize();
+                }
+                if (str->Size() < cur_offset) {
+                    diag() << "struct size (" << str->Size()
+                           << ") is smaller than the end of the last member (" << cur_offset << ")";
+                    return false;
+                }
+
+                auto padding = str->Size() - cur_offset;
+                if (padding >= internal_limits::kMaxStructMemberPadding) {
+                    diag() << "struct padding (" << padding << ") is larger then the max ("
+                           << internal_limits::kMaxStructMemberPadding << ")";
+                    return false;
+                }
+
+                return true;
+            },
             [&](const core::type::Reference* ref) {
                 if (ref->StoreType()->Is<core::type::Void>()) {
                     diag() << "references to void are not permitted";
@@ -1822,14 +2182,43 @@ void Validator::CheckType(const core::type::Type* root,
                     return false;
                 }
 
-                if (type != root) {
-                    // Nesting pointer types inside structures is guarded by a capability.
-                    if (!(root->Is<core::type::Struct>() &&
-                          capabilities_.Contains(
-                              Capability::kAllowPointersAndHandlesInStructures))) {
-                        diag() << "nested pointer types are not permitted";
+                if (ptr->AddressSpace() == AddressSpace::kUniform ||
+                    ptr->AddressSpace() == AddressSpace::kHandle) {
+                    if (ptr->Access() != core::Access::kRead) {
+                        diag() << "uniform and handle pointers must be read access";
                         return false;
                     }
+                }
+
+                if (ptr->AddressSpace() == AddressSpace::kWorkgroup) {
+                    if (ptr->Access() != core::Access::kReadWrite) {
+                        diag() << "workgroup pointers must be read_write access";
+                        return false;
+                    }
+                }
+
+                if (ptr->AddressSpace() == AddressSpace::kHandle) {
+                    if (!ptr->StoreType()->IsHandle()) {
+                        diag() << "the 'handle' address space can only be used for handle types";
+                        return false;
+                    }
+                } else {
+                    if (ptr->StoreType()->IsHandle()) {
+                        diag() << "handle types can only be declared in the 'handle' address space";
+                        return false;
+                    }
+                }
+
+                if (ptr->AddressSpace() == core::AddressSpace::kImmediate) {
+                    if (ptr->Access() != core::Access::kRead) {
+                        diag() << "immediate pointers must be read access";
+                        return false;
+                    }
+                }
+
+                if (ptr->StoreType()->Is<core::type::Pointer>()) {
+                    diag() << "pointers to pointers are not allowed";
+                    return false;
                 }
                 return true;
             },
@@ -1857,6 +2246,20 @@ void Validator::CheckType(const core::type::Type* root,
                 }
                 return true;
             },
+            [&](const core::type::Array* arr) {
+                if (!arr->ElemType()->HasCreationFixedFootprint()) {
+                    diag() << "array elements, " << NameOf(type)
+                           << ", must have creation-fixed footprint";
+                    return false;
+                }
+                if (arr->Count()->Is<core::type::RuntimeArrayCount>()) {
+                    if (addrspace != AddressSpace::kStorage) {
+                        diag() << "runtime arrays must be in the 'storage' address space";
+                        return false;
+                    }
+                }
+                return true;
+            },
             [&](const core::type::Vector* v) {
                 if (!v->Type()->IsScalar()) {
                     diag() << "vector elements, " << NameOf(type) << ", must be scalars";
@@ -1868,6 +2271,36 @@ void Validator::CheckType(const core::type::Type* root,
                 if (!m->Type()->IsFloatScalar()) {
                     diag() << "matrix elements, " << NameOf(type) << ", must be float scalars";
                     return false;
+                }
+                return true;
+            },
+            [&](const core::type::Atomic* a) {
+                if (!a->Type()->IsAnyOf<core::type::I32, core::type::U32>()) {
+                    diag() << "atomic subtype must be i32 or u32";
+                    return false;
+                }
+                return true;
+            },
+            [&](const core::type::SampledTexture* s) {
+                if (!s->Type()->IsAnyOf<core::type::F32, core::type::I32, core::type::U32>()) {
+                    diag() << "invalid sampled texture sample type: " << NameOf(s->Type());
+                    return false;
+                }
+                return true;
+            },
+            [&](const core::type::MultisampledTexture* ms) {
+                if (!ms->Type()->IsAnyOf<core::type::F32, core::type::I32, core::type::U32>()) {
+                    diag() << "invalid multisampled texture sample type: " << NameOf(ms->Type());
+                    return false;
+                }
+
+                switch (ms->Dim()) {
+                    case core::type::TextureDimension::k2d:
+                        break;
+                    default:
+                        diag() << "invalid multisampled texture dimension: "
+                               << style::Literal(ToString(ms->Dim()));
+                        return false;
                 }
                 return true;
             },
@@ -1885,6 +2318,55 @@ void Validator::CheckType(const core::type::Type* root,
                     default:
                         return true;
                 }
+            },
+            [&](const core::type::InputAttachment* i) {
+                if (!i->Type()->IsAnyOf<core::type::F32, core::type::I32, core::type::U32>()) {
+                    diag() << "invalid input attachment component type: " << NameOf(i->Type());
+                    return false;
+                }
+                return true;
+            },
+            [&](const core::type::SubgroupMatrix* m) {
+                if (!m->Type()
+                         ->IsAnyOf<core::type::F16, core::type::F32, core::type::I8,
+                                   core::type::I32, core::type::U8, core::type::U32>()) {
+                    diag() << "invalid subgroup matrix component type: " << NameOf(m->Type());
+                    return false;
+                }
+                if (!(addrspace == AddressSpace::kUndefined ||
+                      addrspace == AddressSpace::kFunction)) {
+                    diag() << "invalid address space for subgroup matrix : " << addrspace;
+                    return false;
+                }
+                return true;
+            },
+            [&](const core::type::BindingArray* t) {
+                if (!t->Count()->Is<core::type::ConstantArrayCount>()) {
+                    diag() << "binding_array count must be a constant expression";
+                    return false;
+                }
+                if (!(addrspace == AddressSpace::kUndefined ||
+                      addrspace == AddressSpace::kHandle) &&
+                    !capabilities_.Contains(Capability::kAllowPointersAndHandlesInStructures)) {
+                    diag() << "invalid address space for binding_array : " << addrspace;
+                    return false;
+                }
+
+                if (!capabilities_.Contains(Capability::kAllowNonCoreTypes)) {
+                    if (!t->ElemType()->Is<core::type::SampledTexture>()) {
+                        diag() << "binding_array element type must be a sampled texture type";
+                        return false;
+                    }
+                }
+                return true;
+            },
+            [&](const core::type::ResourceBinding*) {
+                if (!capabilities_.Contains(Capability::kAllowResourceBinding)) {
+                    diag() << "resource_binding type can only be used with kAllowResourceBinding "
+                              "capability";
+                    return false;
+                }
+                return true;
             },
             [](Default) { return true; });
     };
@@ -1997,8 +2479,17 @@ void Validator::CheckFunction(const Function* func) {
     scope_stack_.Push();
     TINT_DEFER(scope_stack_.Pop());
 
-    // Checking the name early, so its usage can be recorded, even if the function is malformed.
     if (func->IsEntryPoint()) {
+        // Check that there is at most one entry point unless we allow multiple entry points.
+        if (!capabilities_.Contains(Capability::kAllowMultipleEntryPoints)) {
+            if (!entry_point_names_.IsEmpty()) {
+                AddError(func) << "a module with multiple entry points requires the "
+                                  "AllowMultipleEntryPoints capability";
+                return;
+            }
+        }
+
+        // Checking the name early, so its usage can be recorded, even if the function is malformed.
         const auto name = mod_.NameOf(func).Name();
         if (!entry_point_names_.Add(name)) {
             AddError(func) << "entry point name " << style::Function(name) << " is not unique";
@@ -2051,25 +2542,32 @@ void Validator::CheckFunction(const Function* func) {
             Capabilities{Capability::kAllowRefTypes});
 
         if (!IsValidFunctionParamType(param->Type())) {
+            auto ptr_ty = param->Type()->As<core::type::Pointer>();
+            bool allowed_ptr_to_handle =
+                capabilities_.Contains(Capability::kAllowPointerToHandle) && ptr_ty != nullptr &&
+                ptr_ty->StoreType()->IsHandle();
+
             auto struct_ty = param->Type()->As<core::type::Struct>();
-            if (!capabilities_.Contains(Capability::kAllowPointersAndHandlesInStructures) ||
-                (struct_ty == nullptr) ||
-                struct_ty->Members().Any([](const core::type::StructMember* m) {
-                    return !IsValidFunctionParamType(m->Type());
-                })) {
+            if (!allowed_ptr_to_handle &&
+                (!capabilities_.Contains(Capability::kAllowPointersAndHandlesInStructures) ||
+                 (struct_ty == nullptr) ||
+                 struct_ty->Members().Any([](const core::type::StructMember* m) {
+                     return !IsValidFunctionParamType(m->Type());
+                 }))) {
                 AddError(param) << "function parameter type, " << NameOf(param->Type())
                                 << ", must be constructible, a pointer, or a handle";
             }
         }
 
         CheckFunctionParamAttributesAndType(param, CheckBuiltinFunctionParam(""));
+        CheckFunctionParamAttributesAndType(param, CheckColorFunctionParam(""));
 
         CheckFunctionParamAttributes(
             param,
             CheckInvariantFunc<FunctionParam>(
-                "invariant can only decorate a param iff it is also decorated with position"),
+                "invariant can only decorate a param if it is also decorated with position"),
             CheckInvariantFunc<FunctionParam>(
-                "invariant can only decorate a param member iff it is also "
+                "invariant can only decorate a param member if it is also "
                 "decorated with position"));
 
         if (func->IsFragment()) {
@@ -2100,8 +2598,9 @@ void Validator::CheckFunction(const Function* func) {
 
         if (func->IsEntryPoint()) {
             {
-                auto result = ValidateShaderIOAnnotations(param->Type(), param->BindingPoint(),
-                                                          param->Attributes(), "input param");
+                auto result =
+                    ValidateShaderIOAnnotations(param->Type(), param->BindingPoint(),
+                                                param->Attributes(), ShaderIOKind::kInputParam);
                 if (result != Success) {
                     AddError(param) << result.Failure();
                 }
@@ -2118,6 +2617,17 @@ void Validator::CheckFunction(const Function* func) {
                 AddError(param)
                     << "input param to non-entry point function has a binding point set";
             }
+            if (param->Builtin().has_value()) {
+                AddError(param) << "builtins can only be decorated on entry point params";
+            }
+        }
+
+        if (!capabilities_.Contains(Capability::kAllowWorkspacePointerInputToEntryPoint) &&
+            func->IsEntryPoint()) {
+            if (mv && mv->Is<core::type::Pointer>() && address_space == AddressSpace::kWorkgroup) {
+                AddError(param) << "input param to entry point cannot be a ptr in the 'workgroup' "
+                                   "address space";
+            }
         }
 
         scope_stack_.Add(param);
@@ -2133,9 +2643,9 @@ void Validator::CheckFunction(const Function* func) {
     CheckFunctionReturnAttributes(
         func,
         CheckInvariantFunc<Function>(
-            "invariant can only decorate outputs iff they are also position builtins"),
+            "invariant can only decorate outputs if they are also position builtins"),
         CheckInvariantFunc<Function>(
-            "invariant can only decorate output members iff they are also position builtins"));
+            "invariant can only decorate output members if they are also position builtins"));
     // void needs to be filtered out, since it isn't constructible, but used in the IR when no
     // return is specified.
     if (DAWN_UNLIKELY(!func->ReturnType()->Is<core::type::Void>() &&
@@ -2159,23 +2669,43 @@ void Validator::CheckFunction(const Function* func) {
     }
 
     if (func->IsEntryPoint()) {
-        auto result = ValidateShaderIOAnnotations(func->ReturnType(), std::nullopt,
-                                                  func->ReturnAttributes(), "return values");
+        auto result = ValidateShaderIOAnnotations(
+            func->ReturnType(), std::nullopt, func->ReturnAttributes(), ShaderIOKind::kResultValue);
         if (result != Success) {
             AddError(func) << result.Failure();
         }
+
+        CheckEntryPointLocationsAndBlendSrc(func);
 
         CheckFunctionReturnAttributesAndType(
             func, CheckFrontFacingIfBoolFunc<Function>("entry point returns can not be 'bool'"),
             CheckFrontFacingIfBoolFunc<Function>("entry point return members can not be 'bool'"));
 
+        Hashset<BindingPoint, 4> binding_points{};
+
         for (auto var : referenced_module_vars_.TransitiveReferences(func)) {
+            if (!capabilities_.Contains(Capability::kAllowDuplicateBindings) &&
+                var->BindingPoint().has_value()) {
+                auto bp = var->BindingPoint().value();
+                if (!binding_points.Add(bp)) {
+                    AddError(var) << "found non-unique binding point, " << bp
+                                  << ", being referenced in entry point, " << NameOf(func);
+                }
+            }
+
             const auto* mv = var->Result()->Type()->As<core::type::MemoryView>();
             const auto* ty = var->Result()->Type()->UnwrapPtrOrRef();
             const auto attr = var->Attributes();
             if (!mv || !ty) {
                 continue;
             }
+
+            CheckIOAttributes(
+                func, attr, ty,
+                CheckInvariantFunc<Function>(
+                    "invariant can only decorate vars if they are also position builtins"),
+                CheckInvariantFunc<Function>(
+                    "invariant can only decorate members if they are also position builtins"));
 
             if (mv->AddressSpace() != AddressSpace::kIn &&
                 mv->AddressSpace() != AddressSpace::kOut) {
@@ -2208,6 +2738,63 @@ void Validator::CheckFunction(const Function* func) {
     ProcessTasks();
 }
 
+void Validator::CheckEntryPointLocationsAndBlendSrc(const Function* func) {
+    BlendSrcContext input_ctx{func->Stage(), {}, {}, nullptr, IODirection::kInput};
+    BlendSrcContext output_ctx{func->Stage(), {}, {}, nullptr, IODirection::kOutput};
+
+    // First pass validates blend_src usages and pre-populates location hash with related values
+    for (auto* param : func->Params()) {
+        CheckBlendSrc(input_ctx, param, param->Type(), param->Attributes());
+    }
+    CheckBlendSrc(output_ctx, func, func->ReturnType(), func->ReturnAttributes());
+
+    for (auto* var : referenced_module_vars_.TransitiveReferences(func)) {
+        auto* mv = var->Result()->Type()->As<core::type::MemoryView>();
+        if (mv != nullptr) {
+            if (mv->AddressSpace() == AddressSpace::kIn) {
+                CheckBlendSrc(input_ctx, var, mv->StoreType(), var->Attributes());
+            }
+
+            if (mv->AddressSpace() == AddressSpace::kOut) {
+                CheckBlendSrc(output_ctx, var, mv->StoreType(), var->Attributes());
+            }
+        }
+    }
+
+    // No check for number inputs, since there is no case where blend_src on an input value is
+    // allowed, and will cause errors earlier, so don't need a duplicate error here.
+
+    if (!output_ctx.blend_srcs.IsEmpty()) {
+        if (output_ctx.blend_srcs.Count() != 2) {
+            AddError(func) << "if any @blend_src is used on an output, then @blend_src(0) and "
+                              "@blend_src(1) must be used";
+        }
+    }
+
+    // Second pass validates all non-blend_src usages
+    for (auto* param : func->Params()) {
+        CheckLocation(input_ctx.locations, param, param->Attributes(), func->Stage(), param->Type(),
+                      IODirection::kInput);
+    }
+    CheckLocation(output_ctx.locations, func, func->ReturnAttributes(), func->Stage(),
+                  func->ReturnType(), IODirection::kOutput);
+
+    for (auto* var : referenced_module_vars_.TransitiveReferences(func)) {
+        auto* mv = var->Result()->Type()->As<core::type::MemoryView>();
+        if (mv != nullptr) {
+            if (mv->AddressSpace() == AddressSpace::kIn) {
+                CheckLocation(input_ctx.locations, var, var->Attributes(), func->Stage(),
+                              mv->StoreType(), IODirection::kInput);
+            }
+
+            if (mv->AddressSpace() == AddressSpace::kOut) {
+                CheckLocation(output_ctx.locations, var, var->Attributes(), func->Stage(),
+                              mv->StoreType(), IODirection::kOutput);
+            }
+        }
+    }
+}
+
 void Validator::CheckWorkgroupSize(const Function* func) {
     if (!func->IsCompute()) {
         if (func->WorkgroupSize().has_value()) {
@@ -2225,6 +2812,8 @@ void Validator::CheckWorkgroupSize(const Function* func) {
     // The number parameters cannot be checked here, since it is stored internally as a 3 element
     // array, so will always have 3 elements at this point.
     TINT_ASSERT(workgroup_sizes.size() == 3);
+
+    uint64_t total_size = 1;
 
     std::optional<const core::type::Type*> sizes_ty;
     for (auto* size : workgroup_sizes) {
@@ -2254,6 +2843,7 @@ void Validator::CheckWorkgroupSize(const Function* func) {
                 AddError(func) << "@workgroup_size params must be greater than 0";
                 return;
             }
+            total_size *= c->Value()->ValueAs<uint64_t>();
             continue;
         }
 
@@ -2285,7 +2875,16 @@ void Validator::CheckWorkgroupSize(const Function* func) {
             //        if  not constant expression && not override expression:
             //            fail
             //    pass
+
+            continue;
         }
+
+        AddError(func) << "@workgroup_size must be an InstructionResult or a Constant";
+    }
+
+    constexpr uint64_t kMaxGridSize = 0xffffffff;
+    if (total_size > kMaxGridSize) {
+        AddError(func) << "workgroup grid size cannot exceed 0x" << std::hex << kMaxGridSize;
     }
 }
 
@@ -2306,9 +2905,9 @@ void Validator::CheckVertexEntryPoint(const Function* ep) {
         CheckIOAttributes(
             ep, attr, ty,
             CheckInvariantFunc<Function>(
-                "invariant can only decorate vars iff they are also position builtins"),
+                "invariant can only decorate vars if they are also position builtins"),
             CheckInvariantFunc<Function>(
-                "invariant can only decorate members iff they are also position builtins"));
+                "invariant can only decorate members if they are also position builtins"));
 
         // Builtin rules are not checked on module-scope variables, because they are often generated
         // as part of the backend transforms, and have different rules for correctness.
@@ -2490,13 +3089,6 @@ void Validator::CheckVar(const Var* var) {
         return;
     }
 
-    if (mv->UnwrapPtrOrRef()->IsHandle()) {
-        if (mv->AddressSpace() != AddressSpace::kHandle) {
-            AddError(var) << "handle types can only be declared in the 'handle' address space";
-            return;
-        }
-    }
-
     if (var->Block() != mod_.root_block && mv->AddressSpace() != AddressSpace::kFunction) {
         if (!capabilities_.Contains(Capability::kAllowPrivateVarsInFunctions) ||
             mv->AddressSpace() != AddressSpace::kPrivate) {
@@ -2508,9 +3100,10 @@ void Validator::CheckVar(const Var* var) {
     // Check that initializer and result type match
     if (var->Initializer()) {
         if (mv->AddressSpace() != AddressSpace::kFunction &&
-            mv->AddressSpace() != AddressSpace::kPrivate) {
-            AddError(var)
-                << "only variables in the function or private address space may be initialized";
+            mv->AddressSpace() != AddressSpace::kPrivate &&
+            mv->AddressSpace() != AddressSpace::kOut) {
+            AddError(var) << "only variables in the function, private, or __out address space may "
+                             "be initialized";
             return;
         }
 
@@ -2557,6 +3150,11 @@ void Validator::CheckVar(const Var* var) {
             AddError(var) << "vars in the 'storage' address space must be host-shareable";
             return;
         }
+        if (mv->Access() != core::Access::kReadWrite && mv->Access() != core::Access::kRead) {
+            AddError(var)
+                << "vars in the 'storage' address space must have access 'read' or 'read-write'";
+            return;
+        }
     }
 
     if (mv->AddressSpace() == AddressSpace::kUniform) {
@@ -2567,16 +3165,24 @@ void Validator::CheckVar(const Var* var) {
         }
     }
 
-    // Check that non-handle variables don't have @input_attachment_index set
-    if (var->InputAttachmentIndex().has_value() && mv->AddressSpace() != AddressSpace::kHandle) {
-        AddError(var) << "'@input_attachment_index' is not valid for non-handle var";
-        return;
+    if (var->InputAttachmentIndex().has_value()) {
+        if (mv->AddressSpace() != AddressSpace::kHandle) {
+            AddError(var) << "'@input_attachment_index' is not valid for non-handle var";
+            return;
+        }
+        if (!capabilities_.Contains(Capability::kAllowAnyInputAttachmentIndexType) &&
+            !mv->UnwrapPtrOrRef()->Is<core::type::InputAttachment>()) {
+            AddError(var)
+                << "'@input_attachment_index' is only valid for 'input_attachment' type var";
+            return;
+        }
     }
 
     if (var->Block() == mod_.root_block) {
         if (mv->AddressSpace() == AddressSpace::kIn || mv->AddressSpace() == AddressSpace::kOut) {
-            auto result = ValidateShaderIOAnnotations(var->Result()->Type(), var->BindingPoint(),
-                                                      var->Attributes(), "module scope variable");
+            auto result =
+                ValidateShaderIOAnnotations(var->Result()->Type(), var->BindingPoint(),
+                                            var->Attributes(), ShaderIOKind::kModuleScopeVar);
             if (result != Success) {
                 AddError(var) << result.Failure();
             }
@@ -2620,17 +3226,166 @@ Result<SuccessType, std::string> Validator::ValidateBindingPoint(
     return Success;
 }
 
+void Validator::CheckBlendSrc(BlendSrcContext& ctx,
+                              const CastableBase* target,
+                              const core::type::Type* ty,
+                              const IOAttributes& attr) {
+    if (attr.blend_src.has_value()) {
+        if (!capabilities_.Contains(Capability::kLoosenValidationForShaderIO)) {
+            AddError(target) << "blend_src cannot be used on non-struct-member types";
+        }
+        CheckBlendSrcAnnotation(ctx, target, ty, attr);
+    }
+
+    tint::Switch(
+        ty,
+        [&](const core::type::Struct* s) {
+            if (s->Members().Any([](auto* m) { return m->Attributes().blend_src.has_value(); })) {
+                auto location_count = 0u;
+                for (const auto* mem : s->Members()) {
+                    auto& mem_attr = mem->Attributes();
+                    if (mem_attr.location.has_value()) {
+                        location_count++;
+                    }
+                    CheckBlendSrcAnnotation(ctx, target, mem->Type(), mem_attr);
+                }
+
+                if (location_count != 2) {
+                    AddError(target)
+                        << "structs with blend_src members must have exactly 2 members with "
+                           "location annotations";
+                }
+            } else {
+                RejectBlendSrcAnnotationOnStructMembers(ctx, target, s);
+            }
+        },
+        [&](const core::type::Array* a) { RejectBlendSrcAnnotationOnArrayElement(ctx, target, a); },
+        [&](Default) {});
+}
+
+void Validator::CheckBlendSrcAnnotation(BlendSrcContext& ctx,
+                                        const CastableBase* target,
+                                        const core::type::Type* ty,
+                                        const IOAttributes& attr) {
+    if (!attr.blend_src.has_value()) {
+        return;
+    }
+
+    auto bs_val = attr.blend_src.value();
+    if (bs_val != 0 && bs_val != 1) {
+        AddError(target) << "blend_src value must be 0 or 1";
+    }
+    if (!ctx.blend_srcs.Add(bs_val)) {
+        AddError(target) << "duplicate blend_src(" << bs_val << ") on entry point "
+                         << ToString(ctx.dir);
+    }
+
+    if (ctx.dir != IODirection::kOutput || ctx.stage != Function::PipelineStage::kFragment) {
+        AddError(target) << "blend_src can only be used on fragment shader outputs";
+        return;
+    }
+    if (!attr.location.has_value() || attr.location.value() != 0) {
+        AddError(target) << "struct members with blend_src must be located at 0";
+    }
+
+    if (attr.location.has_value()) {
+        ctx.locations.Add(attr.location.value(), target);
+    }
+
+    if (!ctx.blend_src_type) {
+        if (!ty->IsNumericScalarOrVector()) {
+            AddError(target) << "blend_src must be a numeric scalar or vector, but has type "
+                             << ty->FriendlyName();
+        }
+        ctx.blend_src_type = ty;
+    } else if (ctx.blend_src_type != ty) {
+        AddError(target) << "blend_src type " << ty->FriendlyName()
+                         << " does not match other blend_src type "
+                         << ctx.blend_src_type->FriendlyName();
+    }
+}
+
+void Validator::RejectBlendSrcAnnotationOnStructMembers(BlendSrcContext& ctx,
+                                                        const CastableBase* target,
+                                                        const core::type::Struct* str) {
+    for (const auto* mem : str->Members()) {
+        auto mem_attr = mem->Attributes();
+        if (mem_attr.blend_src.has_value()) {
+            AddError(target) << "blend_src cannot be used on members of non-top level structs";
+        }
+        tint::Switch(
+            mem->Type(),  //
+            [&](const core::type::Struct* s) {
+                RejectBlendSrcAnnotationOnStructMembers(ctx, target, s);
+            },
+            [&](const core::type::Array* a) {
+                RejectBlendSrcAnnotationOnArrayElement(ctx, target, a);
+            },
+            [&](Default) {});
+    }
+}
+
+void Validator::RejectBlendSrcAnnotationOnArrayElement(BlendSrcContext& ctx,
+                                                       const CastableBase* target,
+                                                       const core::type::Array* arr) {
+    tint::Switch(
+        arr->ElemType(),  //
+        [&](const core::type::Struct* s) {
+            RejectBlendSrcAnnotationOnStructMembers(ctx, target, s);
+        },
+        [&](const core::type::Array* a) { RejectBlendSrcAnnotationOnArrayElement(ctx, target, a); },
+        [&](Default) {});
+}
+
+void Validator::CheckLocation(Hashmap<uint32_t, const CastableBase*, 4>& locations,
+                              const CastableBase* target,
+                              const IOAttributes& attr,
+                              Function::PipelineStage stage,
+                              const core::type::Type* type,
+                              IODirection dir) {
+    if (auto* str = type->As<core::type::Struct>()) {
+        for (auto* member : str->Members()) {
+            if (!member->Attributes().blend_src.has_value()) {
+                CheckLocation(locations, target, member->Attributes(), stage, member->Type(), dir);
+            }
+        }
+    }
+
+    if (attr.blend_src) {
+        // locations associated with a blend_src usage should already be pre-populated in locations
+        return;
+    }
+
+    if (attr.location.has_value()) {
+        if (stage == Function::PipelineStage::kCompute && dir == IODirection::kInput) {
+            AddError(target) << "location attribute is not valid for compute shader inputs";
+        }
+
+        auto loc = attr.location.value();
+        if (auto conflict = locations.Get(loc)) {
+            AddError(target) << "duplicate location(" << loc << ") on entry point "
+                             << ToString(dir);
+            AddDeclarationNote(*conflict.value);
+        } else {
+            locations.Add(loc, target);
+        }
+    }
+}
+
 Result<SuccessType, std::string> Validator::ValidateShaderIOAnnotations(
     const core::type::Type* ty,
     const std::optional<struct BindingPoint>& binding_point,
     const core::IOAttributes& attr,
-    const std::string& target_str) {
+    ShaderIOKind kind) {
     EnumSet<IOAnnotation> annotations;
+
     // Since there is no entries in the set at this point, this should never fail.
     TINT_ASSERT(AddIOAnnotationsFromIOAttributes(annotations, attr) == Success);
+
     if (binding_point.has_value()) {
         annotations.Add(IOAnnotation::kBindingPoint);
     }
+
     if (auto* mv = ty->As<core::type::MemoryView>()) {
         if (mv->AddressSpace() == AddressSpace::kWorkgroup) {
             annotations.Add(IOAnnotation::kWorkgroup);
@@ -2639,9 +3394,48 @@ Result<SuccessType, std::string> Validator::ValidateShaderIOAnnotations(
 
     if (ty->Is<core::type::Void>()) {
         if (!annotations.Empty()) {
-            return target_str + " with void type should never be annotated";
+            return ToString(kind) + " with void type should never be annotated";
         }
         return Success;
+    }
+
+    if (attr.location.has_value()) {
+        if (capabilities_.Contains(Capability::kAllowLocationForNumericElements)) {
+            std::function<bool(const core::type::Type*)> is_numeric =
+                [&is_numeric](const core::type::Type* t) -> bool {
+                t = t->UnwrapPtrOrRef();
+                bool result = false;
+                tint::Switch(
+                    t,
+                    [&](const core::type::Struct* s) {
+                        for (auto* m : s->Members()) {
+                            if (!is_numeric(m->Type())) {
+                                return;
+                            }
+                        }
+                        result = true;
+                    },
+                    [&](Default) {
+                        auto* e = t->DeepestElement()->UnwrapPtrOrRef();
+                        tint::Switch(
+                            e, [&](const core::type::Struct* s) { result = is_numeric(s); },
+                            [&](Default) { result = e->IsNumericScalarOrVector(); });
+                    });
+                return result;
+            };
+            if (!is_numeric(ty)) {
+                return ToString(kind) +
+                       " with a location attribute must contain only numeric elements " +
+                       ty->FriendlyName();
+            }
+        } else {
+            if (!ty->UnwrapPtrOrRef()->IsNumericScalarOrVector()) {
+                return ToString(kind) +
+                       " with a location attribute must be a numeric scalar or vector, but has "
+                       "type " +
+                       ty->FriendlyName();
+            }
+        }
     }
 
     if (auto* ty_struct = ty->UnwrapPtrOrRef()->As<core::type::Struct>()) {
@@ -2649,9 +3443,28 @@ Result<SuccessType, std::string> Validator::ValidateShaderIOAnnotations(
             EnumSet<IOAnnotation> mem_annotations = annotations;
             auto add_result = AddIOAnnotationsFromIOAttributes(mem_annotations, mem->Attributes());
             if (add_result != Success) {
-                return target_str +
+                return ToString(kind) +
                        " struct member has same IO annotation, as top-level struct, '" +
                        ToString(add_result.Failure()) + "'";
+            }
+
+            if (mem->Attributes().location.has_value()) {
+                if (capabilities_.Contains(Capability::kAllowLocationForNumericElements)) {
+                    if (!mem->Type()->UnwrapPtrOrRef()->IsNumericScalarOrVector() &&
+                        !mem->Type()->UnwrapPtrOrRef()->Is<core::type::Struct>()) {
+                        return ToString(kind) +
+                               " struct member with a location attribute must be a numeric scalar, "
+                               "a numeric vector or a struct, but has type " +
+                               mem->Type()->FriendlyName();
+                    }
+                } else {
+                    if (!mem->Type()->UnwrapPtrOrRef()->IsNumericScalarOrVector()) {
+                        return ToString(kind) +
+                               " struct member with a location attribute must be a numeric scalar "
+                               "or vector, but has type " +
+                               mem->Type()->FriendlyName();
+                    }
+                }
             }
 
             if (capabilities_.Contains(Capability::kAllowPointersAndHandlesInStructures)) {
@@ -2663,23 +3476,27 @@ Result<SuccessType, std::string> Validator::ValidateShaderIOAnnotations(
             }
 
             if (mem_annotations.Empty()) {
-                return target_str +
+                return ToString(kind) +
                        " struct members must have at least one IO annotation, e.g. a binding "
                        "point, a location, etc";
             }
 
             if (mem_annotations.Size() > 1) {
-                return target_str + " struct member has more than one IO annotation, " +
+                return ToString(kind) + " struct member has more than one IO annotation, " +
                        ToString(mem_annotations);
             }
         }
     } else {
         if (annotations.Empty()) {
-            return target_str +
-                   " must have at least one IO annotation, e.g. a binding point, a location, etc";
+            if (!(capabilities_.Contains(Capability::kAllowUnannotatedModuleIOVariables) &&
+                  kind == ShaderIOKind::kModuleScopeVar)) {
+                return ToString(kind) +
+                       " must have at least one IO annotation, e.g. a binding point, a location, "
+                       "etc";
+            }
         }
         if (annotations.Size() > 1) {
-            return target_str + " has more than one IO annotation, " + ToString(annotations);
+            return ToString(kind) + " has more than one IO annotation, " + ToString(annotations);
         }
     }
     return Success;
@@ -2703,11 +3520,7 @@ void Validator::CheckLet(const Let* l) {
     }
 
     auto* result_ty = l->Result()->Type();
-    if (capabilities_.Contains(Capability::kAllowAnyLetType)) {
-        if (result_ty->Is<core::type::Void>()) {
-            AddError(l) << "result type cannot be void";
-        }
-    } else {
+    if (!capabilities_.Contains(Capability::kAllowAnyLetType)) {
         if (!result_ty->IsConstructible() && !result_ty->Is<core::type::Pointer>()) {
             AddError(l) << "result type, " << NameOf(result_ty)
                         << ", must be concrete constructible type or a pointer type";
@@ -2739,9 +3552,9 @@ void Validator::CheckCall(const Call* call) {
                                            Hashset<const ir::UserCall*, 4>{});  //
                 calls.Add(c);                                                   //
                 user_func_calls_.Replace(c->Target(), calls);                   //
-            }                                                                   //
-            CheckUserCall(c);                                                   //
-        },                                                                      //
+            }
+            CheckUserCall(c);
+        },
         [&](Default) {
             // Validation of custom IR instructions
         });
@@ -2880,6 +3693,72 @@ void Validator::CheckBuiltinCall(const BuiltinCall* call) {
                        << " does not match builtin return type " << NameOf(builtin->return_type);
         return;
     }
+
+    if (auto* bc = call->As<CoreBuiltinCall>()) {
+        CheckCoreBuiltinCall(bc, builtin.Get());
+    }
+}
+
+void Validator::CheckCoreBuiltinCall(const CoreBuiltinCall* call,
+                                     const core::intrinsic::Overload& overload) {
+    if (call->Func() == core::BuiltinFn::kQuadBroadcast ||
+        call->Func() == core::BuiltinFn::kSubgroupBroadcast) {
+        TINT_ASSERT(call->Args().Length() == 2);
+        constexpr uint32_t kIdArg = 1;
+        auto* id = call->Args()[kIdArg];
+        if (!id->Is<core::ir::Constant>()) {
+            AddError(call, kIdArg) << "non-constant ID provided";
+        }
+        return;
+    }
+
+    auto idx_for_usage = [&](core::ParameterUsage usage) -> std::optional<uint32_t> {
+        for (uint32_t i = 0; i < overload.parameters.Length(); ++i) {
+            auto& p = overload.parameters[i];
+            if (p.usage == usage) {
+                return int32_t(i);
+            }
+        }
+        return std::nullopt;
+    };
+
+    auto check_arg_in_range = [&](core::ParameterUsage usage, int32_t min, int32_t max) {
+        auto idx_opt = idx_for_usage(usage);
+        if (!idx_opt.has_value()) {
+            return;
+        }
+        uint32_t idx = idx_opt.value();
+        TINT_ASSERT(idx < call->Args().Length());
+
+        auto* val = call->Args()[idx];
+        if (auto* const_val = val->As<ir::Constant>()) {
+            auto* cnst = const_val->Value();
+
+            if (val->Type()->Is<core::type::Vector>()) {
+                for (size_t i = 0; i < cnst->NumElements(); i++) {
+                    auto value = cnst->Index(i)->ValueAs<int32_t>();
+                    if (value < min || value > max) {
+                        AddError(call, idx)
+                            << value << " outside range of [" << min << ", " << max << "]";
+                        return;
+                    }
+                }
+            } else {
+                auto value = cnst->ValueAs<int32_t>();
+                if (value < min || value > max) {
+                    AddError(call, idx)
+                        << value << " outside range of [" << min << ", " << max << "]";
+                    return;
+                }
+            }
+        } else {
+            AddError(call, idx) << "expected a constant value";
+            return;
+        }
+    };
+
+    check_arg_in_range(core::ParameterUsage::kComponent, 0, 3);
+    check_arg_in_range(core::ParameterUsage::kOffset, -8, 7);
 }
 
 void Validator::CheckMemberBuiltinCall(const MemberBuiltinCall* call) {
@@ -2919,13 +3798,81 @@ void Validator::CheckConstruct(const Construct* construct) {
         return;
     }
 
+    auto* result_type = construct->Result()->Type();
+
+    if (!result_type->IsConstructible()) {
+        // We only allow `construct` to create non-constructible types when they are structures that
+        // contain pointers and handle types, with the corresponding capability enabled.
+        if (!(result_type->Is<core::type::Struct>() &&
+              capabilities_.Contains(Capability::kAllowPointersAndHandlesInStructures))) {
+            AddError(construct) << "type is not constructible";
+            return;
+        }
+    }
+
     auto args = construct->Args();
     if (args.IsEmpty()) {
         // Zero-value constructors are valid for all constructible types.
         return;
     }
 
-    if (auto* str = As<core::type::Struct>(construct->Result()->Type())) {
+    auto check_args_match_elements = [&] {
+        // Check that type type of each argument matches the expected element type of the composite.
+        for (size_t i = 0; i < args.Length(); i++) {
+            if (args[i]->Is<ir::Unused>()) {
+                continue;
+            }
+            auto* expected_type = result_type->Element(static_cast<uint32_t>(i));
+            if (args[i]->Type() != expected_type) {
+                AddError(construct, Construct::kArgsOperandOffset + i)
+                    << "type " << NameOf(args[i]->Type()) << " of argument " << i
+                    << " does not match expected type " << NameOf(expected_type);
+            }
+        }
+    };
+
+    if (result_type->Is<core::type::Scalar>()) {
+        // The only valid non-zero scalar constructor is the identity operation.
+        if (args.Length() > 1) {
+            AddError(construct) << "scalar construct must not have more than one argument";
+        }
+        if (args[0]->Type() != result_type) {
+            AddError(construct, 0u) << "scalar construct argument type " << NameOf(args[0]->Type())
+                                    << " does not match result type " << NameOf(result_type);
+        }
+    } else if (auto* sg_mat = result_type->As<core::type::SubgroupMatrix>()) {
+        if (args.Length() > 1) {
+            AddError(construct) << "subgroup matrix construct must not have more than 1 argument";
+        } else {
+            if (args[0]->Type() != sg_mat->Type()) {
+                AddError(construct)
+                    << "subgroup matrix construct argument type " << NameOf(args[0]->Type())
+                    << " does not match matrix type " << NameOf(sg_mat->Type());
+            }
+        }
+    } else if (auto* vec = result_type->As<core::type::Vector>()) {
+        auto table = intrinsic::Table<intrinsic::Dialect>(type_mgr_, symbols_);
+        auto ctor_conv = intrinsic::VectorCtorConv(vec->Width());
+        auto arg_types = Transform<4>(args, [&](auto* v) { return v->Type(); });
+        auto match = table.Lookup(ctor_conv, Vector{vec->Type()}, std::move(arg_types),
+                                  core::EvaluationStage::kConstant);
+        if (match != Success) {
+            AddError(construct) << "no matching overload for " << vec->FriendlyName()
+                                << " constructor";
+        }
+    } else if (auto* mat = result_type->As<core::type::Matrix>()) {
+        auto table = intrinsic::Table<intrinsic::Dialect>(type_mgr_, symbols_);
+        auto ctor_conv = intrinsic::MatrixCtorConv(mat->Columns(), mat->Rows());
+        auto arg_types = Transform<8>(args, [&](auto* v) { return v->Type(); });
+        auto match = table.Lookup(ctor_conv, Vector{mat->Type()}, std::move(arg_types),
+                                  core::EvaluationStage::kConstant);
+        if (match != Success) {
+            AddError(construct) << "no matching overload for " << mat->FriendlyName()
+                                << " constructor";
+        }
+    } else if (result_type->Is<core::type::Array>()) {
+        check_args_match_elements();
+    } else if (auto* str = As<core::type::Struct>(result_type)) {
         auto members = str->Members();
         if (args.Length() != str->Members().Length()) {
             AddError(construct) << "structure has " << members.Length()
@@ -2933,16 +3880,7 @@ void Validator::CheckConstruct(const Construct* construct) {
                                 << " arguments";
             return;
         }
-        for (size_t i = 0; i < args.Length(); i++) {
-            if (args[i]->Is<ir::Unused>()) {
-                continue;
-            }
-            if (args[i]->Type() != members[i]->Type()) {
-                AddError(construct, Construct::kArgsOperandOffset + i)
-                    << "type " << NameOf(args[i]->Type()) << " of argument " << i
-                    << " does not match type " << NameOf(members[i]->Type()) << " of struct member";
-            }
-        }
+        check_args_match_elements();
     }
 }
 
@@ -3005,6 +3943,11 @@ void Validator::CheckUserCall(const UserCall* call) {
     if (call->Target()->IsEntryPoint()) {
         AddError(call, UserCall::kFunctionOperandOffset)
             << "call target must not have a pipeline stage";
+    }
+
+    if (call->Target()->ReturnType() != call->Result()->Type()) {
+        AddError(call) << "result type does not match function return type";
+        return;
     }
 
     auto args = call->Args();
@@ -3138,7 +4081,16 @@ void Validator::CheckAccess(const Access* a) {
 }
 
 void Validator::CheckBinary(const Binary* b) {
-    if (!CheckResultsAndOperandRange(b, Binary::kNumResults, Binary::kNumOperands)) {
+    if (!CheckResultsAndOperands(b, Binary::kNumResults, Binary::kNumOperands)) {
+        return;
+    }
+
+    if (b->Op() == core::BinaryOp::kLogicalAnd) {
+        AddError(b) << "logical-and is not valid in the IR";
+        return;
+    }
+    if (b->Op() == core::BinaryOp::kLogicalOr) {
+        AddError(b) << "logical-or is not valid in the IR";
         return;
     }
 
@@ -3164,7 +4116,7 @@ void Validator::CheckBinary(const Binary* b) {
 }
 
 void Validator::CheckUnary(const Unary* u) {
-    if (!CheckResultsAndOperandRange(u, Unary::kNumResults, Unary::kNumOperands)) {
+    if (!CheckResultsAndOperands(u, Unary::kNumResults, Unary::kNumOperands)) {
         return;
     }
 
@@ -3190,10 +4142,17 @@ void Validator::CheckUnary(const Unary* u) {
 
 void Validator::CheckIf(const If* if_) {
     CheckResults(if_);
-    CheckOperand(if_, If::kConditionOperandOffset);
+    CheckOperands(if_, If::kNumOperands);
 
     if (if_->Condition() && !if_->Condition()->Type()->Is<core::type::Bool>()) {
         AddError(if_, If::kConditionOperandOffset) << "condition type must be 'bool'";
+    }
+
+    if (if_->False() && if_->False()->Is<core::ir::MultiInBlock>()) {
+        AddError(if_) << "if false block must be a block";
+    }
+    if (if_->True() && if_->True()->Is<core::ir::MultiInBlock>()) {
+        AddError(if_) << "if true block must be a block";
     }
 
     tasks_.Push([this] { control_stack_.Pop(); });
@@ -3208,6 +4167,16 @@ void Validator::CheckIf(const If* if_) {
 }
 
 void Validator::CheckLoop(const Loop* l) {
+    CheckResults(l);
+    CheckOperands(l, 0);
+
+    if (!l->Initializer()->IsEmpty()) {
+        if (!l->Initializer()->Terminator() ||
+            !l->Initializer()->Terminator()->Is<core::ir::NextIteration>()) {
+            AddError(l->Initializer()) << "loop initializer must have a NextIteration terminator";
+        }
+    }
+
     // Note: Tasks are queued in reverse order of their execution
     tasks_.Push([this, l] {
         first_continues_.Remove(l);  // No need for this any more. Free memory.
@@ -3288,7 +4257,8 @@ void Validator::CheckLoopContinuing(const Loop* loop) {
 }
 
 void Validator::CheckSwitch(const Switch* s) {
-    CheckOperand(s, Switch::kConditionOperandOffset);
+    CheckResults(s);
+    CheckOperands(s, Switch::kNumOperands);
 
     if (s->Condition() && !s->Condition()->Type()->IsIntegerScalar()) {
         auto* cond_ty = s->Condition() ? s->Condition()->Type() : nullptr;
@@ -3300,10 +4270,20 @@ void Validator::CheckSwitch(const Switch* s) {
 
     bool found_default = false;
     for (auto& cse : s->Cases()) {
-        QueueBlock(cse.block);
+        if (cse.block->Is<core::ir::MultiInBlock>()) {
+            AddError(s) << "case block must be a block";
+        }
 
+        if (cse.selectors.IsEmpty()) {
+            AddError(s) << "case does not have any selectors";
+        }
+
+        QueueBlock(cse.block);
         for (const auto& sel : cse.selectors) {
             if (sel.IsDefault()) {
+                if (found_default) {
+                    AddError(s) << "multiple default selectors in switch";
+                }
                 found_default = true;
             }
         }
@@ -3363,8 +4343,10 @@ void Validator::CheckTerminator(const Terminator* b) {
         return;
     }
 
-    // Note, transforms create `undef` terminator arguments (this is done in MergeReturn and
-    // DemoteToHelper) so we can't add validation.
+    // Operands must be alive and in scope if they are not nullptr.
+    if (!CheckOperands(b)) {
+        return;
+    }
 
     tint::Switch(
         b,                                                           //
@@ -3383,6 +4365,16 @@ void Validator::CheckTerminator(const Terminator* b) {
 }
 
 void Validator::CheckBreakIf(const BreakIf* b) {
+    if (b->Condition() == nullptr) {
+        AddError(b) << "break_if condition cannot be nullptr";
+        return;
+    }
+
+    if (!b->Condition()->Type() || !b->Condition()->Type()->Is<core::type::Bool>()) {
+        AddError(b) << "condition must be a 'bool'";
+        return;
+    }
+
     auto* loop = b->Loop();
     if (loop == nullptr) {
         AddError(b) << "has no associated loop";
@@ -3395,13 +4387,13 @@ void Validator::CheckBreakIf(const BreakIf* b) {
 
     auto next_iter_values = b->NextIterValues();
     if (auto* body = loop->Body()) {
-        CheckOperandsMatchTarget(b, b->ArgsOperandOffset(), next_iter_values.Length(), body,
+        CheckOperandsMatchTarget(b, b->ArgsOperandOffset(), next_iter_values.size(), body,
                                  body->Params());
     }
 
     auto exit_values = b->ExitValues();
-    CheckOperandsMatchTarget(b, b->ArgsOperandOffset() + next_iter_values.Length(),
-                             exit_values.Length(), loop, loop->Results());
+    CheckOperandsMatchTarget(b, b->ArgsOperandOffset() + next_iter_values.size(),
+                             exit_values.size(), loop, loop->Results());
 }
 
 void Validator::CheckContinue(const Continue* c) {
@@ -3489,8 +4481,13 @@ void Validator::CheckReturn(const Return* ret) {
         return;
     }
 
+    if (func != ContainingFunction(ret)) {
+        AddError(ret) << "function operand does not match containing function";
+        return;
+    }
+
     if (func->ReturnType()->Is<core::type::Void>()) {
-        if (ret->Value()) {
+        if (ret->HasValue()) {
             AddError(ret) << "unexpected return value";
         }
     } else {
@@ -3556,6 +4553,30 @@ void Validator::CheckExitLoop(const ExitLoop* l) {
     }
 }
 
+bool Validator::CanLoad(const core::type::Type* ty) {
+    return tint::Switch(
+        ty,  //
+        [&](const core::type::Array* arr) {
+            if (arr->Count()->Is<core::type::RuntimeArrayCount>()) {
+                return false;
+            }
+            return CanLoad(arr->Elements().type);
+        },
+        [&](const core::type::Struct* str) {
+            for (auto* member : str->Members()) {
+                if (member->Type()->Is<core::type::Pointer>() &&
+                    capabilities_.Contains(Capability::kAllowPointersAndHandlesInStructures)) {
+                    continue;
+                }
+                if (!CanLoad(member->Type())) {
+                    return false;
+                }
+            }
+            return true;
+        },
+        [&](Default) { return ty->IsConstructible() || ty->IsHandle(); });
+}
+
 void Validator::CheckLoad(const Load* l) {
     if (!CheckResultsAndOperands(l, Load::kNumResults, Load::kNumOperands)) {
         return;
@@ -3580,6 +4601,12 @@ void Validator::CheckLoad(const Load* l) {
             AddError(l, Load::kFromOperandOffset)
                 << "result type " << NameOf(l->Result()->Type())
                 << " does not match source store type " << NameOf(mv->StoreType());
+        }
+
+        if (!CanLoad(mv->StoreType())) {
+            AddError(l, Load::kFromOperandOffset)
+                << "type " << NameOf(mv->StoreType()) << " cannot be loaded";
+            return;
         }
     }
 }
@@ -3611,6 +4638,12 @@ void Validator::CheckStore(const Store* s) {
                 AddError(s, Store::kFromOperandOffset)
                     << "value type " << NameOf(value_type) << " does not match store type "
                     << NameOf(store_type);
+                return;
+            }
+
+            if (!store_type->IsConstructible()) {
+                AddError(s) << "store type " << NameOf(store_type) << " is not constructible";
+                return;
             }
         }
     }
@@ -3623,12 +4656,31 @@ void Validator::CheckLoadVectorElement(const LoadVectorElement* l) {
     }
 
     if (auto* res = l->Result(0)) {
-        if (auto* el_ty = GetVectorPtrElementType(l, LoadVectorElement::kFromOperandOffset)) {
-            if (res->Type() != el_ty) {
-                AddResultError(l, 0)
-                    << "result type " << NameOf(res->Type())
-                    << " does not match vector pointer element type " << NameOf(el_ty);
-            }
+        auto* el_ty = GetVectorPtrElementType(l, LoadVectorElement::kFromOperandOffset);
+        if (!el_ty) {
+            return;
+        }
+        if (res->Type() != el_ty) {
+            AddResultError(l, 0) << "result type " << NameOf(res->Type())
+                                 << " does not match vector pointer element type " << NameOf(el_ty);
+            return;
+        }
+    }
+
+    if (!l->Index()->Type()->IsIntegerScalar()) {
+        AddError(l, LoadVectorElement::kIndexOperandOffset)
+            << "load vector element index must be an integer scalar";
+    }
+    if (auto* c = l->Index()->As<core::ir::Constant>()) {
+        auto val = c->Value()->ValueAs<uint32_t>();
+
+        auto* vec_ty = l->From()->Type()->UnwrapPtrOrRef()->As<core::type::Vector>();
+        TINT_ASSERT(vec_ty);
+
+        if (val >= vec_ty->Width()) {
+            AddError(l, LoadVectorElement::kIndexOperandOffset)
+                << "load vector element index must be in range [0, " << (vec_ty->Width() - 1)
+                << "]";
         }
     }
 }
@@ -3640,12 +4692,41 @@ void Validator::CheckStoreVectorElement(const StoreVectorElement* s) {
     }
 
     if (auto* value = s->Value()) {
-        if (auto* el_ty = GetVectorPtrElementType(s, StoreVectorElement::kToOperandOffset)) {
-            if (value->Type() != el_ty) {
-                AddError(s, StoreVectorElement::kValueOperandOffset)
-                    << "value type " << NameOf(value->Type())
-                    << " does not match vector pointer element type " << NameOf(el_ty);
-            }
+        auto* el_ty = GetVectorPtrElementType(s, StoreVectorElement::kToOperandOffset);
+        if (!el_ty) {
+            return;
+        }
+        if (value->Type() != el_ty) {
+            AddError(s, StoreVectorElement::kValueOperandOffset)
+                << "value type " << NameOf(value->Type())
+                << " does not match vector pointer element type " << NameOf(el_ty);
+            return;
+        }
+
+        // The `GetVectorPtrElementType` has already validated that the pointer exists.
+        auto* mv = s->To()->Type()->As<core::type::MemoryView>();
+        if (mv->Access() != core::Access::kWrite && mv->Access() != core::Access::kReadWrite) {
+            AddError(s, StoreVectorElement::kToOperandOffset)
+                << "store_vector_element target operand has a non-writeable access type, "
+                << style::Literal(ToString(mv->Access()));
+            return;
+        }
+    }
+
+    if (!s->Index()->Type()->IsIntegerScalar()) {
+        AddError(s, StoreVectorElement::kIndexOperandOffset)
+            << "store vector element index must be an integer scalar";
+    }
+    if (auto* c = s->Index()->As<core::ir::Constant>()) {
+        auto val = c->Value()->ValueAs<uint32_t>();
+
+        auto* vec_ty = s->To()->Type()->UnwrapPtrOrRef()->As<core::type::Vector>();
+        TINT_ASSERT(vec_ty);
+
+        if (val >= vec_ty->Width()) {
+            AddError(s, StoreVectorElement::kIndexOperandOffset)
+                << "store vector element index must be in range [0, " << (vec_ty->Width() - 1)
+                << "]";
         }
     }
 }
@@ -3694,11 +4775,13 @@ void Validator::CheckOperandsMatchTarget(const Instruction* source_inst,
 const core::type::Type* Validator::GetVectorPtrElementType(const Instruction* inst, size_t idx) {
     auto* operand = inst->Operands()[idx];
     if (DAWN_UNLIKELY(!operand)) {
+        AddError(inst, idx) << "missing element operand";
         return nullptr;
     }
 
     auto* type = operand->Type();
     if (DAWN_UNLIKELY(!type)) {
+        AddError(inst, idx) << "missing operand type";
         return nullptr;
     }
 
@@ -3727,11 +4810,12 @@ Result<SuccessType> Validate(const Module& mod, Capabilities capabilities) {
 
 Result<SuccessType> ValidateAndDumpIfNeeded([[maybe_unused]] const Module& ir,
                                             [[maybe_unused]] const char* msg,
-                                            [[maybe_unused]] Capabilities capabilities) {
+                                            [[maybe_unused]] Capabilities capabilities,
+                                            [[maybe_unused]] std::string_view timing) {
 #if TINT_DUMP_IR_WHEN_VALIDATING
     auto printer = StyledTextPrinter::Create(stdout);
     std::cout << "=========================================================\n";
-    std::cout << "== IR dump before " << msg << ":\n";
+    std::cout << "== IR dump " << timing << " " << msg << ":\n";
     std::cout << "=========================================================\n";
     printer->Print(Disassembler(ir).Text());
 #endif
@@ -3743,6 +4827,73 @@ Result<SuccessType> ValidateAndDumpIfNeeded([[maybe_unused]] const Module& ir,
     }
 #endif
 
+    return Success;
+}
+
+Result<uint32_t> ValidateSingleUserImmediate(const Module& ir, core::ir::Function* ep) {
+    uint32_t user_immediate_size = 0;
+
+    core::ir::ReferencedModuleVars<const core::ir::Module> referenced_module_vars{ir};
+    auto& refs = referenced_module_vars.TransitiveReferences(ep);
+    for (auto* var : refs) {
+        auto* ptr = var->Result()->Type()->As<core::type::Pointer>();
+        if (!ptr) {
+            continue;
+        }
+        if (ptr->AddressSpace() == core::AddressSpace::kImmediate) {
+            if (user_immediate_size > 0) {
+                return Failure("module contains multiple user-declared immediate data");
+            }
+            user_immediate_size = tint::RoundUp(4u, ptr->StoreType()->Size());
+        }
+    }
+    return user_immediate_size;  // 0 if none found
+}
+
+Result<SuccessType> ValidateInternalImmediateOffset(uint32_t max_immediate_block_size,
+                                                    uint32_t user_immediate_data_size,
+                                                    const std::vector<ImmediateInfo>& immediates) {
+    struct Range {
+        uint32_t offset;
+        uint32_t size;
+    };
+    std::vector<Range> ranges;
+    ranges.reserve(immediates.size());
+    for (size_t i = 0; i < immediates.size(); ++i) {
+        const auto& info = immediates[i];
+        if (info.size == 0) {
+            return Failure("immediate data #" + std::to_string(i) + " has zero size");
+        }
+        if (info.offset & 0x3) {
+            return Failure("immediate data #" + std::to_string(i) +
+                           " offset is not 4-byte aligned");
+        }
+        if (info.offset < user_immediate_data_size) {
+            return Failure("immediate data #" + std::to_string(i) +
+                           " overlaps user-declared immediate data region");
+        }
+        if (info.offset > max_immediate_block_size) {
+            return Failure("immediate data #" + std::to_string(i) +
+                           " offset exceeds maximum immediate block size");
+        }
+        if (info.size > max_immediate_block_size ||
+            info.offset > max_immediate_block_size - info.size) {
+            return Failure("immediate data #" + std::to_string(i) +
+                           " (offset + size) exceeds maximum immediate block size");
+        }
+        ranges.push_back(Range{info.offset, info.size});
+    }
+    std::sort(ranges.begin(), ranges.end(),
+              [](const Range& a, const Range& b) { return a.offset < b.offset; });
+    for (size_t i = 1; i < ranges.size(); ++i) {
+        const auto& prev = ranges[i - 1];
+        const auto& cur = ranges[i];
+        if (cur.offset < prev.offset + prev.size) {
+            return Failure("immediate data ranges overlap (offset " + std::to_string(prev.offset) +
+                           " size " + std::to_string(prev.size) + " and offset " +
+                           std::to_string(cur.offset) + " size " + std::to_string(cur.size) + ")");
+        }
+    }
     return Success;
 }
 

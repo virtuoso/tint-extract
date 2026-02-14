@@ -32,14 +32,12 @@
 
 #include "src/tint/api/common/override_id.h"
 
+#include "src/tint/lang/core/enums.h"
 #include "src/tint/lang/core/fluent_types.h"
 #include "src/tint/lang/core/interpolation.h"
-#include "src/tint/lang/core/interpolation_sampling.h"
-#include "src/tint/lang/core/interpolation_type.h"
 #include "src/tint/lang/core/number.h"
-#include "src/tint/lang/core/subgroup_matrix_kind.h"
-#include "src/tint/lang/core/texel_format.h"
 #include "src/tint/lang/core/type/sampler_kind.h"
+#include "src/tint/lang/core/type/texel_buffer.h"
 #include "src/tint/lang/core/type/texture_dimension.h"
 #include "src/tint/lang/wgsl/ast/alias.h"
 #include "src/tint/lang/wgsl/ast/assignment_statement.h"
@@ -61,7 +59,6 @@
 #include "src/tint/lang/wgsl/ast/diagnostic_control.h"
 #include "src/tint/lang/wgsl/ast/diagnostic_directive.h"
 #include "src/tint/lang/wgsl/ast/diagnostic_rule_name.h"
-#include "src/tint/lang/wgsl/ast/disable_validation_attribute.h"
 #include "src/tint/lang/wgsl/ast/discard_statement.h"
 #include "src/tint/lang/wgsl/ast/enable.h"
 #include "src/tint/lang/wgsl/ast/float_literal_expression.h"
@@ -85,12 +82,9 @@
 #include "src/tint/lang/wgsl/ast/phony_expression.h"
 #include "src/tint/lang/wgsl/ast/requires.h"
 #include "src/tint/lang/wgsl/ast/return_statement.h"
-#include "src/tint/lang/wgsl/ast/row_major_attribute.h"
 #include "src/tint/lang/wgsl/ast/stage_attribute.h"
-#include "src/tint/lang/wgsl/ast/stride_attribute.h"
 #include "src/tint/lang/wgsl/ast/struct.h"
 #include "src/tint/lang/wgsl/ast/struct_member_align_attribute.h"
-#include "src/tint/lang/wgsl/ast/struct_member_offset_attribute.h"
 #include "src/tint/lang/wgsl/ast/struct_member_size_attribute.h"
 #include "src/tint/lang/wgsl/ast/switch_statement.h"
 #include "src/tint/lang/wgsl/ast/templated_identifier.h"
@@ -100,9 +94,7 @@
 #include "src/tint/lang/wgsl/ast/variable_decl_statement.h"
 #include "src/tint/lang/wgsl/ast/while_statement.h"
 #include "src/tint/lang/wgsl/ast/workgroup_attribute.h"
-#include "src/tint/lang/wgsl/builtin_fn.h"
-#include "src/tint/lang/wgsl/extension.h"
-#include "src/tint/utils/generation_id.h"
+#include "src/tint/lang/wgsl/enums.h"
 #include "src/tint/utils/memory/block_allocator.h"
 #include "src/tint/utils/symbol/symbol_table.h"
 #include "src/tint/utils/text/string.h"
@@ -153,44 +145,38 @@ class Builder {
     /// perfectly-forward the first argument.
     template <typename... TYPES>
     using DisableIfSource =
-        traits::EnableIf<!IsSource<traits::Decay<traits::NthTypeOf<0, TYPES..., void>>>>;
+        std::enable_if_t<!IsSource<std::decay_t<traits::NthTypeOf<0, TYPES..., void>>>>;
 
     /// A helper used to disable overloads if the first type in `TYPES` is a scalar type. Used to
     /// avoid ambiguities in overloads that take a scalar as the first parameter and those that
     /// perfectly-forward the first argument.
     template <typename... TYPES>
     using DisableIfScalar =
-        traits::EnableIf<!IsScalar<traits::Decay<traits::NthTypeOf<0, TYPES..., void>>>>;
+        std::enable_if_t<!IsScalar<std::decay_t<traits::NthTypeOf<0, TYPES..., void>>>>;
 
     /// A helper used to enable overloads if the first type in `TYPES` is a scalar type. Used to
     /// avoid ambiguities in overloads that take a scalar as the first parameter and those that
     /// perfectly-forward the first argument.
     template <typename... TYPES>
     using EnableIfScalar =
-        traits::EnableIf<IsScalar<traits::Decay<traits::NthTypeOf<0, TYPES..., void>>>>;
+        std::enable_if_t<IsScalar<std::decay_t<traits::NthTypeOf<0, TYPES..., void>>>>;
 
     /// A helper used to disable overloads if the first type in `TYPES` is a Vector or
     /// VectorRef.
     template <typename... TYPES>
     using DisableIfVectorLike =
-        traits::EnableIf<!IsVectorLike<traits::Decay<traits::NthTypeOf<0, TYPES..., void>>>>;
+        std::enable_if_t<!IsVectorLike<std::decay_t<traits::NthTypeOf<0, TYPES..., void>>>>;
 
     /// A helper used to enable overloads if the first type in `TYPES` is identifier-like.
     template <typename... TYPES>
     using EnableIfIdentifierLike =
-        traits::EnableIf<IsIdentifierLike<traits::Decay<traits::NthTypeOf<0, TYPES..., void>>>>;
+        std::enable_if_t<IsIdentifierLike<std::decay_t<traits::NthTypeOf<0, TYPES..., void>>>>;
 
     /// A helper used to disable overloads if the first type in `TYPES` is Infer or an abstract
     /// numeric.
     template <typename... TYPES>
     using DisableIfInferOrAbstract =
-        traits::EnableIf<!IsInferOrAbstract<traits::Decay<traits::NthTypeOf<0, TYPES..., void>>>>;
-
-    /// A helper used to enable overloads if the first type in `TYPES` is Infer or an abstract
-    /// numeric.
-    template <typename... TYPES>
-    using EnableIfInferOrAbstract =
-        traits::EnableIf<IsInferOrAbstract<traits::Decay<traits::NthTypeOf<0, TYPES..., void>>>>;
+        std::enable_if_t<!IsInferOrAbstract<std::decay_t<traits::NthTypeOf<0, TYPES..., void>>>>;
 
     /// VarOptions is a helper for accepting an arbitrary number of order independent options for
     /// constructing an ast::Var.
@@ -309,9 +295,6 @@ class Builder {
     /// @return this builder
     Builder& operator=(Builder&& rhs);
 
-    /// @returns the unique identifier for this program
-    GenerationID ID() const { return id_; }
-
     /// @returns a reference to the program's AST nodes storage
     ASTNodeAllocator& ASTNodes() {
         AssertNotMoved();
@@ -380,9 +363,10 @@ class Builder {
     /// @param args the arguments to pass to the constructor
     /// @returns the node pointer
     template <typename T, typename... ARGS>
-    traits::EnableIfIsType<T, ast::Node>* create(const Source& source, ARGS&&... args) {
+        requires(traits::IsTypeOrDerived<T, ast::Node>)
+    T* create(const Source& source, ARGS&&... args) {
         AssertNotMoved();
-        return ast_nodes_.Create<T>(id_, AllocateNodeID(), source, std::forward<ARGS>(args)...);
+        return ast_nodes_.Create<T>(AllocateNodeID(), source, std::forward<ARGS>(args)...);
     }
 
     /// Creates a new ast::Node owned by the Builder, injecting the current
@@ -392,9 +376,10 @@ class Builder {
     /// destructed.
     /// @returns the node pointer
     template <typename T>
-    traits::EnableIfIsType<T, ast::Node>* create() {
+        requires(traits::IsTypeOrDerived<T, ast::Node>)
+    T* create() {
         AssertNotMoved();
-        return ast_nodes_.Create<T>(id_, AllocateNodeID(), source_);
+        return ast_nodes_.Create<T>(AllocateNodeID(), source_);
     }
 
     /// Creates a new ast::Node owned by the Builder, injecting the current
@@ -406,13 +391,13 @@ class Builder {
     /// @param args the remaining arguments to pass to the constructor
     /// @returns the node pointer
     template <typename T, typename ARG0, typename... ARGS>
-    traits::EnableIf</* T is ast::Node and ARG0 is not Source */
+    std::enable_if_t</* T is ast::Node and ARG0 is not Source */
                      traits::IsTypeOrDerived<T, ast::Node> &&
                          !traits::IsTypeOrDerived<ARG0, Source>,
                      T>*
     create(ARG0&& arg0, ARGS&&... args) {
         AssertNotMoved();
-        return ast_nodes_.Create<T>(id_, AllocateNodeID(), source_, std::forward<ARG0>(arg0),
+        return ast_nodes_.Create<T>(AllocateNodeID(), source_, std::forward<ARG0>(arg0),
                                     std::forward<ARGS>(args)...);
     }
 
@@ -509,6 +494,20 @@ class Builder {
         /// @param source the Source of the node
         /// @returns a 'u32' type
         ast::Type u32(const Source& source) const { return (*this)(source, "u32"); }
+
+        /// @returns a 'i8' type
+        ast::Type i8() const { return (*this)("i8"); }
+
+        /// @param source the Source of the node
+        /// @returns a 'i8' type
+        ast::Type i8(const Source& source) const { return (*this)(source, "i8"); }
+
+        /// @returns a 'u8' type
+        ast::Type u8() const { return (*this)("u8"); }
+
+        /// @param source the Source of the node
+        /// @returns a 'u8' type
+        ast::Type u8(const Source& source) const { return (*this)(source, "u8"); }
 
         /// @param type vector subtype
         /// @param n vector width in elements
@@ -908,101 +907,71 @@ class Builder {
         }
 
         /// @param subtype the array element type
-        /// @param attrs the optional attributes for the array
         /// @return an array of type `T`
-        ast::Type array(ast::Type subtype, VectorRef<const ast::Attribute*> attrs = Empty) const {
-            return array(builder->source_, subtype, std::move(attrs));
-        }
+        ast::Type array(ast::Type subtype) const { return array(builder->source_, subtype); }
 
         /// @param source the Source of the node
         /// @param subtype the array element type
-        /// @param attrs the optional attributes for the array
         /// @return an array of type `T`
-        ast::Type array(const Source& source,
-                        ast::Type subtype,
-                        VectorRef<const ast::Attribute*> attrs = Empty) const {
+        ast::Type array(const Source& source, ast::Type subtype) const {
             return ast::Type{builder->Expr(
                 builder->create<ast::TemplatedIdentifier>(source, builder->Sym("array"),
                                                           Vector{
                                                               subtype.expr,
-                                                          },
-                                                          std::move(attrs)))};
+                                                          }))};
         }
 
         /// @param subtype the array element type
         /// @param n the array size. nullptr represents a runtime-array
-        /// @param attrs the optional attributes for the array
         /// @return an array of size `n` of type `T`
         template <typename COUNT, typename = DisableIfVectorLike<COUNT>>
-        ast::Type array(ast::Type subtype,
-                        COUNT&& n,
-                        VectorRef<const ast::Attribute*> attrs = Empty) const {
-            return array(builder->source_, subtype, std::forward<COUNT>(n), std::move(attrs));
+        ast::Type array(ast::Type subtype, COUNT&& n) const {
+            return array(builder->source_, subtype, std::forward<COUNT>(n));
         }
 
         /// @param source the Source of the node
         /// @param subtype the array element type
         /// @param n the array size. nullptr represents a runtime-array
-        /// @param attrs the optional attributes for the array
         /// @return an array of size `n` of type `T`
         template <typename COUNT, typename = DisableIfVectorLike<COUNT>>
-        ast::Type array(const Source& source,
-                        ast::Type subtype,
-                        COUNT&& n,
-                        VectorRef<const ast::Attribute*> attrs = Empty) const {
+        ast::Type array(const Source& source, ast::Type subtype, COUNT&& n) const {
             return ast::Type{builder->Expr(
                 builder->create<ast::TemplatedIdentifier>(source, builder->Sym("array"),
                                                           Vector{
                                                               subtype.expr,
                                                               builder->Expr(std::forward<COUNT>(n)),
-                                                          },
-                                                          std::move(attrs)))};
+                                                          }))};
         }
 
         /// @param source the Source of the node
-        /// @return a inferred-size or runtime-sized array of type `T`
-        template <typename T, int N = 0, typename = EnableIfInferOrAbstract<T>>
-        ast::Type array(const Source& source) const {
-            static_assert(N == 0, "arrays with a count cannot be inferred");
-            return (*this)(source, "array");
-        }
-
-        /// @return a inferred-size or runtime-sized array of type `T`
-        template <typename T, int N = 0, typename = EnableIfInferOrAbstract<T>>
-        ast::Type array() const {
-            static_assert(N == 0, "arrays with a count cannot be inferred");
-            return array<T>(builder->source_);
-        }
-
-        /// @param source the Source of the node
-        /// @param attrs the optional attributes for the array
         /// @return a inferred-size or runtime-sized array of type `T`
         template <typename T, int N = 0, typename = DisableIfInferOrAbstract<T>>
-        ast::Type array(const Source& source,
-                        VectorRef<const ast::Attribute*> attrs = Empty) const {
+        ast::Type array(const Source& source) const {
             if constexpr (N == 0) {
                 return ast::Type{builder->Expr(
                     builder->create<ast::TemplatedIdentifier>(source, builder->Sym("array"),
                                                               Vector<const ast::Expression*, 1>{
                                                                   Of<T>().expr,
-                                                              },
-                                                              std::move(attrs)))};
+                                                              }))};
             } else {
                 return ast::Type{builder->Expr(builder->create<ast::TemplatedIdentifier>(
                     source, builder->Sym("array"),
                     Vector{
                         Of<T>().expr,
                         builder->Expr(builder->source_, core::u32(N)),
-                    },
-                    std::move(attrs)))};
+                    }))};
             }
         }
 
-        /// @param attrs the optional attributes for the array
         /// @return an array of size `N` of type `T`
-        template <typename T, int N = 0, typename = DisableIfInferOrAbstract<T>>
-        ast::Type array(VectorRef<const ast::Attribute*> attrs = Empty) const {
-            return array<T, N>(builder->source_, std::move(attrs));
+        template <typename T, int N = 0>
+        ast::Type array() const {
+            if constexpr (std::is_same_v<T, core::fluent_types::Infer>) {
+                static_assert(N == 0, "arrays with a count cannot be inferred");
+                return (*this)(builder->source_, "array");
+            } else {
+                return array<T, N>(builder->source_);
+            }
         }
 
         /// Creates an alias type
@@ -1286,6 +1255,11 @@ class Builder {
         /// @returns the external texture
         ast::Type external_texture() const { return (*this)("texture_external"); }
 
+        /// @returns the texel buffer
+        ast::Type texel_buffer(core::TexelFormat format, core::Access access) const {
+            return (*this)("texel_buffer", format, access);
+        }
+
         /// @param subtype the texture subtype.
         /// @returns the input attachment
         ast::Type input_attachment(ast::Type subtype) const {
@@ -1402,12 +1376,13 @@ class Builder {
             return create<ast::Identifier>(source, Sym(std::forward<IDENTIFIER>(identifier)));
         }
         return create<ast::TemplatedIdentifier>(source, Sym(std::forward<IDENTIFIER>(identifier)),
-                                                std::move(arg_exprs), Empty);
+                                                std::move(arg_exprs));
     }
 
     /// @param expr the expression
     /// @return expr (passthrough)
-    template <typename T, typename = traits::EnableIfIsType<T, ast::Expression>>
+    template <typename T>
+        requires(traits::IsTypeOrDerived<T, ast::Expression>)
     const T* Expr(const T* expr) {
         return expr;
     }
@@ -2347,23 +2322,6 @@ class Builder {
         return MemberAccessor(source_, std::forward<OBJECT>(object), std::forward<MEMBER>(member));
     }
 
-    /// Creates a ast::StructMemberOffsetAttribute
-    /// @param val the offset expression
-    /// @returns the offset attribute pointer
-    template <typename EXPR>
-    const ast::StructMemberOffsetAttribute* MemberOffset(EXPR&& val) {
-        return create<ast::StructMemberOffsetAttribute>(source_, Expr(std::forward<EXPR>(val)));
-    }
-
-    /// Creates a ast::StructMemberOffsetAttribute
-    /// @param source the source information
-    /// @param val the offset expression
-    /// @returns the offset attribute pointer
-    template <typename EXPR>
-    const ast::StructMemberOffsetAttribute* MemberOffset(const Source& source, EXPR&& val) {
-        return create<ast::StructMemberOffsetAttribute>(source, Expr(std::forward<EXPR>(val)));
-    }
-
     /// Creates a ast::StructMemberSizeAttribute
     /// @param source the source information
     /// @param val the size value
@@ -2396,13 +2354,6 @@ class Builder {
     template <typename EXPR>
     const ast::StructMemberAlignAttribute* MemberAlign(EXPR&& val) {
         return create<ast::StructMemberAlignAttribute>(source_, Expr(std::forward<EXPR>(val)));
-    }
-
-    /// Creates a ast::StrideAttribute
-    /// @param stride the array stride
-    /// @returns the ast::StrideAttribute attribute
-    const ast::StrideAttribute* Stride(uint32_t stride) {
-        return create<ast::StrideAttribute>(source_, stride);
     }
 
     /// Creates the ast::GroupAttribute
@@ -2647,19 +2598,6 @@ class Builder {
                                     VectorRef<const ast::Attribute*> attributes = Empty) {
         return create<ast::StructMember>(source, Ident(std::forward<NAME>(name)), type,
                                          std::move(attributes));
-    }
-
-    /// Creates a ast::StructMember with the given byte offset
-    /// @param offset the offset to use in the StructMemberOffsetAttribute
-    /// @param name the struct member name
-    /// @param type the struct member type
-    /// @returns the struct member pointer
-    template <typename NAME>
-    const ast::StructMember* Member(uint32_t offset, NAME&& name, ast::Type type) {
-        return create<ast::StructMember>(source_, Ident(std::forward<NAME>(name)), type,
-                                         Vector<const ast::Attribute*, 1>{
-                                             MemberOffset(core::AInt(offset)),
-                                         });
     }
 
     /// Creates a ast::BlockStatement with input statements and attributes
@@ -3356,25 +3294,6 @@ class Builder {
                                                Expr(std::forward<EXPR_Z>(z)));
     }
 
-    /// Creates an ast::RowMajorAttribute
-    /// @param source the source information
-    /// @returns the row-major attribute pointer
-    const ast::RowMajorAttribute* RowMajor(const Source& source) {
-        return create<ast::RowMajorAttribute>(source);
-    }
-
-    /// Creates an ast::RowMajorAttribute
-    /// @returns the row-major attribute pointer
-    const ast::RowMajorAttribute* RowMajor() { return create<ast::RowMajorAttribute>(source_); }
-
-    /// Creates an ast::DisableValidationAttribute
-    /// @param validation the validation to disable
-    /// @returns the disable validation attribute pointer
-    const ast::DisableValidationAttribute* Disable(ast::DisabledValidation validation) {
-        return ASTNodes().Create<ast::DisableValidationAttribute>(ID(), AllocateNodeID(),
-                                                                  validation);
-    }
-
     /// Passthrough overload
     /// @param name the diagnostic rule name
     /// @returns @p name
@@ -3532,7 +3451,7 @@ class Builder {
     /// @param args a mix of ast::Expression, ast::Statement, ast::Variables.
     /// @returns the function
     template <typename... ARGS,
-              typename = traits::EnableIf<(CanWrapInStatement<ARGS>::value && ...)>>
+              typename = std::enable_if_t<(CanWrapInStatement<ARGS>::value && ...)>>
     const ast::Function* WrapInFunction(ARGS&&... args) {
         Vector stmts{
             WrapInStatement(std::forward<ARGS>(args))...,
@@ -3551,9 +3470,6 @@ class Builder {
     /// Asserts that the builder has not been moved.
     void AssertNotMoved() const;
 
-    /// The unique identifier for this program
-    GenerationID id_;
-
     /// The last Node identifier
     ast::NodeID last_ast_node_id_ = ast::NodeID{static_cast<decltype(ast::NodeID::value)>(0) - 1};
 
@@ -3564,7 +3480,7 @@ class Builder {
     ast::Module* ast_ = nullptr;
 
     /// The symbol table
-    SymbolTable symbols_{id_};
+    SymbolTable symbols_{};
 
     /// The diagnostic list
     diag::List diagnostics_;
@@ -3607,6 +3523,14 @@ template <>
 struct Builder::TypesBuilder::CToAST<bool> {
     static ast::Type get(const Builder::TypesBuilder* t) { return t->bool_(); }
 };
+template <>
+struct Builder::TypesBuilder::CToAST<core::i8> {
+    static ast::Type get(const Builder::TypesBuilder* t) { return t->i8(); }
+};
+template <>
+struct Builder::TypesBuilder::CToAST<core::u8> {
+    static ast::Type get(const Builder::TypesBuilder* t) { return t->u8(); }
+};
 template <typename T, uint32_t N>
 struct Builder::TypesBuilder::CToAST<core::fluent_types::array<T, N>> {
     static ast::Type get(const Builder::TypesBuilder* t) { return t->array<T, N>(); }
@@ -3641,15 +3565,5 @@ struct CanWrapInStatement<
     : std::true_type {};
 
 }  // namespace tint::ast
-
-namespace tint {
-
-/// @param builder the Builder
-/// @returns the GenerationID of the ast::Builder
-inline GenerationID GenerationIDOf(const ast::Builder* builder) {
-    return builder->ID();
-}
-
-}  // namespace tint
 
 #endif  // SRC_TINT_LANG_WGSL_AST_BUILDER_H_

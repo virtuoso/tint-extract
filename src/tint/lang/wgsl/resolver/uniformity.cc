@@ -27,12 +27,11 @@
 
 #include "src/tint/lang/wgsl/resolver/uniformity.h"
 
-#include <limits>
 #include <string>
 #include <utility>
-#include <vector>
 
-#include "src/tint/lang/core/builtin_value.h"
+#include "src/tint/lang/core/enums.h"
+#include "src/tint/lang/core/type/reference.h"
 #include "src/tint/lang/wgsl/program/program_builder.h"
 #include "src/tint/lang/wgsl/resolver/dependency_graph.h"
 #include "src/tint/lang/wgsl/sem/block_statement.h"
@@ -49,7 +48,6 @@
 #include "src/tint/lang/wgsl/sem/value_conversion.h"
 #include "src/tint/lang/wgsl/sem/variable.h"
 #include "src/tint/lang/wgsl/sem/while_statement.h"
-#include "src/tint/utils/containers/map.h"
 #include "src/tint/utils/containers/scope_stack.h"
 #include "src/tint/utils/containers/unique_vector.h"
 #include "src/tint/utils/macros/defer.h"
@@ -1270,6 +1268,19 @@ class UniformityGraph {
             TINT_ICE_ON_NO_MATCH);
     }
 
+    /// @returns true if @p builtin is workgroup-uniform
+    bool IsWorkgroupUniform(core::BuiltinValue builtin) {
+        switch (builtin) {
+            case core::BuiltinValue::kNumSubgroups:
+            case core::BuiltinValue::kNumWorkgroups:
+            case core::BuiltinValue::kSubgroupSize:
+            case core::BuiltinValue::kWorkgroupId:
+                return true;
+            default:
+                return false;
+        }
+    }
+
     /// Process an identifier expression.
     /// @param cf the input control flow node
     /// @param ident the identifier expression to process
@@ -1280,24 +1291,14 @@ class UniformityGraph {
                                                    bool load_rule = false) {
         // Helper to check if the entry point attribute of `obj` indicates non-uniformity.
         auto has_nonuniform_entry_point_attribute = [&](auto* obj, auto* entry_point) {
-            // Only the num_workgroups and workgroup_id builtins, and subgroup_size builtin used in
-            // compute stage are uniform.
+            // Only the num_subgroups, num_workgroups and workgroup_id builtins, and subgroup_size
+            // builtin used in compute stage are uniform.
             if (auto* builtin_attr = ast::GetAttribute<ast::BuiltinAttribute>(obj->attributes)) {
-                auto builtin = builtin_attr->builtin;
-                if (builtin == core::BuiltinValue::kNumWorkgroups ||
-                    builtin == core::BuiltinValue::kWorkgroupId) {
-                    return false;
-                }
-                if (builtin == core::BuiltinValue::kSubgroupSize) {
-                    if (entry_point->PipelineStage() == ast::PipelineStage::kCompute) {
-                        // Subgroup size is uniform in compute.
-                        return false;
-                    } else {
-                        // Currently the only other allowed usage for subgroup_size is in fragment.
-                        TINT_ASSERT(entry_point->PipelineStage() == ast::PipelineStage::kFragment);
-                        // Subgroup size is considered to be varying for fragment.
-                        return true;
-                    }
+                // Some builtins are workgroup-uniform in compute stages.
+                // All builtins are non-uniform in non-compute stages.
+                // Notably, we consider `subgroup_size` to be non-uniform in fragment shaders.
+                if (entry_point->PipelineStage() == ast::PipelineStage::kCompute) {
+                    return !IsWorkgroupUniform(builtin_attr->builtin);
                 }
             }
             return true;
@@ -1854,6 +1855,7 @@ class UniformityGraph {
                 }
             } else {
                 auto* builtin = sem->Target()->As<sem::BuiltinFn>();
+                auto* construct = sem->Target()->As<sem::ValueConstructor>();
                 if (builtin && builtin->Fn() == wgsl::BuiltinFn::kWorkgroupUniformLoad) {
                     // The workgroupUniformLoad builtin requires its parameter to be uniform.
                     current_function_->RequiredToBeUniform(default_severity)->AddEdge(args[i]);
@@ -1867,6 +1869,16 @@ class UniformityGraph {
                     // Get the severity of subgroup uniformity violations in this context.
                     auto severity = sem_.DiagnosticSeverity(
                         call->args[i], wgsl::CoreDiagnosticRule::kSubgroupUniformity);
+                    if (severity != wgsl::DiagnosticSeverity::kOff) {
+                        current_function_->RequiredToBeUniform(severity)->AddEdge(args[i]);
+                    }
+                } else if (((builtin && builtin->IsSubgroupMatrix()) ||
+                            (construct &&
+                             construct->ReturnType()->Is<core::type::SubgroupMatrix>()))) {
+                    // For all subgroup matrix builtins and constructors, all arguments must be
+                    // uniform.
+                    auto severity = sem_.DiagnosticSeverity(
+                        call->args[i], wgsl::ChromiumDiagnosticRule::kSubgroupMatrixUniformity);
                     if (severity != wgsl::DiagnosticSeverity::kOff) {
                         current_function_->RequiredToBeUniform(severity)->AddEdge(args[i]);
                     }
@@ -2137,29 +2149,37 @@ class UniformityGraph {
             cause->type == Node::kFunctionCallArgumentContents) {
             bool is_value = (cause->type == Node::kFunctionCallArgumentValue);
 
-            auto* user_func = target->As<sem::Function>();
-            if (user_func) {
-                // Recurse into the called function to show the reason for the requirement.
-                auto next_function = functions_.Get(user_func->Declaration());
-                auto& param_info = next_function->parameters[cause->arg_index];
-                MakeError(*next_function,
-                          is_value ? param_info.value : param_info.ptr_input_contents, severity);
+            Switch(
+                target,  //
+                [&](const sem::Function* user_func) {
+                    // Recurse into the called function to show the reason for the requirement.
+                    auto next_function = functions_.Get(user_func->Declaration());
+                    auto& param_info = next_function->parameters[cause->arg_index];
+                    MakeError(*next_function,
+                              is_value ? param_info.value : param_info.ptr_input_contents,
+                              severity);
 
-                // Show the place where the non-uniform argument was passed.
-                // If this is a builtin, this will be the trigger location for the failure.
-                StringStream ss;
-                ss << "possibly non-uniform value passed" << (is_value ? "" : " via pointer")
-                   << " here";
-                report(call->args[cause->arg_index]->source, ss.str(), /* note */ true);
-            } else {
-                // The uniformity requirement must come from a builtin function.
-                auto* builtin = target->As<sem::BuiltinFn>();
-                TINT_ASSERT(builtin);
-                StringStream ss;
-                ss << "'" << builtin->Fn() << "' requires argument " << cause->arg_index << " to "
-                   << (is_value ? "be uniform" : "have uniform contents");
-                report(call->args[cause->arg_index]->source, ss.str(), /* note */ false);
-            }
+                    // Show the place where the non-uniform argument was passed.
+                    // If this is a builtin, this will be the trigger location for the failure.
+                    StringStream ss;
+                    ss << "possibly non-uniform value passed" << (is_value ? "" : " via pointer")
+                       << " here";
+                    report(call->args[cause->arg_index]->source, ss.str(), /* note */ true);
+                },
+                [&](const sem::BuiltinFn* builtin) {
+                    StringStream ss;
+                    ss << "'" << builtin->Fn() << "' requires argument " << cause->arg_index
+                       << " to " << (is_value ? "be uniform" : "have uniform contents");
+                    report(call->args[cause->arg_index]->source, ss.str(), /* note */ false);
+                },
+                [&](const sem::ValueConstructor* construct) {
+                    StringStream ss;
+                    ss << construct->ReturnType()->FriendlyName()
+                       << " constructor requires argument " << cause->arg_index << " to "
+                       << (is_value ? "be uniform" : "have uniform contents");
+                    report(call->args[cause->arg_index]->source, ss.str(), /* note */ false);
+                },
+                TINT_ICE_ON_NO_MATCH);
 
             // Show the origin of non-uniformity for the value or data that is being passed.
             ShowSourceOfNonUniformity(source_node->visited_from);
