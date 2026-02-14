@@ -1,0 +1,8 @@
+[submodule "SPIRV-Tools"]
+	path = SPIRV-Tools
+	url = https://github.com/KhronosGroup/SPIRV-Tools.git
+	shallow = true
+[submodule "spirv-headers"]
+	path = spirv-headers
+	url = https://github.com/KhronosGroup/SPIRV-Headers.git
+	shallow = true
