@@ -117,3 +117,5 @@ else()
   message(STATUS "No 'tint' CLI entry point found; building library only.")
 endif()
 
+add_subdirectory(tests)
+
