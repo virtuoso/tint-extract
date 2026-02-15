@@ -161,11 +161,17 @@ class Parser {
         id_stack_.emplace_back();
         {
             TINT_SCOPED_ASSIGNMENT(current_block_, ir_.root_block);
-            EmitSpecConstants();
+            auto res = EmitSpecConstants();
+            if (res != Success) {
+                return res.Failure();
+            }
             EmitModuleScopeVariables();
         }
 
         EmitFunctions();
+        if (result_ != Success) {
+            return result_.Failure();
+        }
         EmitEntryPointAttributes();
 
         RemapSamplers();
@@ -310,7 +316,7 @@ class Parser {
 
     // Generate a module-scope const declaration for each instruction
     // that is OpSpecConstantTrue, OpSpecConstantFalse, or OpSpecConstant.
-    void EmitSpecConstants() {
+    Result<SuccessType> EmitSpecConstants() {
         for (auto& inst : spirv_context_->types_values()) {
             switch (inst.opcode()) {
                 case spv::Op::OpSpecConstantTrue:
@@ -426,11 +432,11 @@ class Parser {
                             EmitSpirvExplicitBuiltinCall(inst, spirv::BuiltinFn::kNot, 3);
                             break;
                         case spv::Op::OpSConvert:
-                            TINT_ICE() << "can't translate SConvert: WGSL does not have concrete "
-                                          "integer types of different widths";
+                            return Failure("can't translate SConvert: WGSL does not have concrete "
+                                          "integer types of different widths");
                         case spv::Op::OpUConvert:
-                            TINT_ICE() << "can't translate UConvert: WGSL does not have concrete "
-                                          "integer types of different widths";
+                            return Failure("can't translate UConvert: WGSL does not have concrete "
+                                          "integer types of different widths");
                         case spv::Op::OpFConvert:
                             Emit(b_.Convert(Type(inst.type_id()),
                                             Value(inst.GetSingleWordInOperand(1))),
@@ -477,23 +483,24 @@ class Parser {
                             EmitCompositeExtract(inst, 3);
                             break;
                         case spv::Op::OpCompositeInsert:
-                            TINT_ICE() << "can't translate OpSpecConstantOp with CompositeInsert: "
+                            return Failure("can't translate OpSpecConstantOp with CompositeInsert: "
                                           "OpSpecConstantOp maps to a WGSL override declaration, "
-                                          "but WGSL overrides must have scalar type";
+                                          "but WGSL overrides must have scalar type");
                         case spv::Op::OpVectorShuffle:
-                            TINT_ICE() << "can't translate OpSpecConstantOp with VectorShuffle: "
+                            return Failure("can't translate OpSpecConstantOp with VectorShuffle: "
                                           "OpSpecConstantOp maps to a WGSL override declaration, "
-                                          "but WGSL overrides must have scalar type";
+                                          "but WGSL overrides must have scalar type");
                         case spv::Op::OpSelect:
-                            TINT_ASSERT(Type(inst.type_id())->IsScalar())
-                                << "can't translate OpSpecConstantOp with Select that returns "
+                            if (!Type(inst.type_id())->IsScalar()) {
+                                return Failure("can't translate OpSpecConstantOp with Select that returns "
                                    "a vector: "
                                    "OpSpecConstantOp maps to a WGSL override declaration, "
-                                   "but WGSL overrides must have scalar type";
+                                   "but WGSL overrides must have scalar type");
+                            }
                             EmitSpirvBuiltinCall(inst, spirv::BuiltinFn::kSelect, 3);
                             break;
                         default:
-                            TINT_ICE() << "Unknown spec constant operation: " << op;
+                            return Failure("Unknown spec constant operation: " + std::to_string(op));
                     }
 
                     // Restore the saved name, if any, in order to provide that
@@ -507,8 +514,9 @@ class Parser {
                 }
                 case spv::Op::OpSpecConstantComposite: {
                     auto spec_id = GetSpecId(inst);
-                    TINT_ASSERT(!spec_id.has_value())
-                        << "OpSpecConstantCompositeOp not supported when set with a SpecId";
+                    if (spec_id.has_value()) {
+                        return Failure("OpSpecConstantCompositeOp not supported when set with a SpecId");
+                    }
 
                     auto* cnst = SpvConstant(inst.result_id());
                     if (cnst != nullptr) {
@@ -536,6 +544,7 @@ class Parser {
                     break;
             }
         }
+        return Success;
     }
 
     void RegisterNames() {
@@ -1690,6 +1699,10 @@ class Parser {
     /// @param dst the Tint IR block to append to
     /// @param src the SPIR-V block to emit
     void EmitBlock(core::ir::Block* dst, spvtools::opt::BasicBlock& src) {
+        if (result_ != Success) {
+            return;
+        }
+
         TINT_SCOPED_ASSIGNMENT(current_block_, dst);
 
         // Register the merge if this is a header block
@@ -1880,6 +1893,9 @@ class Parser {
 
     void ProcessInstructions(spvtools::opt::BasicBlock& src) {
         for (auto& inst : src) {
+            if (result_ != Success) {
+                return;
+            }
             switch (inst.opcode()) {
                 case spv::Op::OpNop:
                     break;
@@ -3043,8 +3059,10 @@ class Parser {
         auto* tex = Value(inst.GetSingleWordInOperand(0));
         auto* img_type = tex->Type()->As<type::Image>();
         TINT_ASSERT(img_type);
-        TINT_ASSERT(img_type->GetMultisampled() != type::Multisampled::kMultisampled)
-            << "Creating an OpTypeSampledImage from a multisampled image is not supported";
+        if (img_type->GetMultisampled() == type::Multisampled::kMultisampled) {
+            Fail("Creating an OpTypeSampledImage from a multisampled image is not supported");
+            return;
+        }
         Emit(b_.CallExplicit<spirv::ir::BuiltinCall>(Type(inst.type_id()),
                                                      spirv::BuiltinFn::kOpSampledImage,
                                                      Vector{tex->Type()}, Args(inst, 2)),
@@ -4450,6 +4468,12 @@ class Parser {
     }
 
   private:
+    Result<SuccessType> result_ = Success;
+
+    void Fail(std::string msg) {
+        result_ = Failure(std::move(msg));
+    }
+
     /// TypeKey describes a SPIR-V type with an access mode.
     struct TypeKey {
         /// The SPIR-V type object.
