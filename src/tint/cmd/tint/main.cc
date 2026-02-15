@@ -313,8 +313,8 @@ If not provided, will be inferred from output filename extension:
     auto& minify = options.Add<BoolOption>("minify", "Minify the output WGSL", Default{false});
     TINT_DEFER(opts->minify = *minify.value);
 
-    auto& overrides = options.Add<StringOption>(
-        "overrides", "Override values as IDENTIFIER=VALUE, comma-separated");
+//    auto& overrides = options.Add<StringOption>(
+//        "overrides", "Override values as IDENTIFIER=VALUE, comma-separated");
 
 #if TINT_BUILD_HLSL_WRITER
     auto& pixel_local_attachment_formats =

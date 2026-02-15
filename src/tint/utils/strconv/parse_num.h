@@ -125,9 +125,9 @@ inline Result<T, ParseNumberError> ParseNumber(std::string_view str) {
     if constexpr (std::is_same_v<T, int16_t>) {
         return ParseInt16(str);
     }
-    if constexpr (std::is_same_v<T, uint16_t>) {
-        return ParseUint16(str);
-    }
+//    if constexpr (std::is_same_v<T, uint16_t>) {
+//        return ParseUint16(str);
+//    }
     if constexpr (std::is_same_v<T, int8_t>) {
         return ParseInt8(str);
     }
