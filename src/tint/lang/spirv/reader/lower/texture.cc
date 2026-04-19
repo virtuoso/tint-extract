@@ -268,7 +268,18 @@ struct State {
                     continue;
                 }
 
-                param->SetType(ptr->StoreType());
+                // Convert pointer-to-handle params to the handle type. For
+                // spirv::type::Image, also lower to the core texture type so
+                // that later image-query / image-fetch passes see the param as
+                // core::type::Texture. The root-block Var loop in Process()
+                // does the same for module-scope vars; without this, cloned
+                // functions can end up with params still typed as
+                // spirv::type::Image, which trips asserts in ImageQuerySize.
+                auto* store_ty = ptr->StoreType();
+                if (auto* img = store_ty->As<spirv::type::Image>()) {
+                    store_ty = TypeForImage(img);
+                }
+                param->SetType(store_ty);
                 usages_to_update.Push(param);
                 called_functions_to_fixup.Add(func);
             }
